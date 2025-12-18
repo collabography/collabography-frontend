@@ -7,7 +7,7 @@ import { cn, formatTime, formatFileSize } from '@/lib/utils';
 
 export default function MusicSelectPage() {
   const navigate = useNavigate();
-  const createProject = useProjectStore(state => state.createProject);
+  const createTempProject = useProjectStore(state => state.createTempProject);
   const setCurrentProject = useProjectStore(state => state.setCurrentProject);
   
   const [file, setFile] = useState<File | null>(null);
@@ -67,11 +67,17 @@ export default function MusicSelectPage() {
   const handleCreate = () => {
     if (!file || !audioUrl || !projectName.trim()) return;
 
-    const newProject = createProject(
+    // TODO: 백엔드 연동 시
+    // 1. projectApi.create(projectName) - 프로젝트 생성
+    // 2. musicApi.initUpload() - presigned URL 발급
+    // 3. uploadToMinIO() - MinIO에 업로드
+    // 4. musicApi.confirmUpload() - 음악 메타 확정
+    
+    // 임시: 로컬에서 프로젝트 생성
+    const newProject = createTempProject(
       projectName.trim(),
-      audioUrl,
-      duration,
-      file.name
+      audioUrl, // 임시로 blob URL 사용
+      duration
     );
     
     setCurrentProject(newProject);
@@ -258,4 +264,3 @@ export default function MusicSelectPage() {
     </div>
   );
 }
-

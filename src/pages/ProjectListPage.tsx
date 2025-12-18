@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { Plus, Music, Users, Calendar } from 'lucide-react';
 import { Button, Card, CardContent } from '@/components/ui';
 import { useProjects } from '@/stores';
-import { cn } from '@/lib/utils';
+import { cn, formatTime } from '@/lib/utils';
 
 export default function ProjectListPage() {
   const navigate = useNavigate();
@@ -66,9 +66,9 @@ export default function ProjectListPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {projects.map((project, index) => (
               <Card
-                key={project.id}
+                key={project.projectId}
                 variant="interactive"
-                onClick={() => navigate(`/project/${project.id}`)}
+                onClick={() => navigate(`/project/${project.projectId}`)}
                 className={cn(
                   'animate-slide-up',
                   'group overflow-hidden'
@@ -98,24 +98,27 @@ export default function ProjectListPage() {
                 
                 <CardContent>
                   <h3 className="font-semibold text-surface-100 mb-3 group-hover:text-white transition-colors">
-                    {project.name}
+                    {project.title}
                   </h3>
                   
                   <div className="space-y-2 text-sm text-surface-400">
                     <div className="flex items-center gap-2">
                       <Music className="w-4 h-4" />
-                      <span>{project.musicName || '음악 없음'}</span>
+                      <span>
+                        {project.musicDurationSec 
+                          ? formatTime(project.musicDurationSec)
+                          : '음악 없음'
+                        }
+                      </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Users className="w-4 h-4" />
-                      <span>
-                        {project.dancers.filter(d => d.track.segments.length > 0).length}명의 댄서
-                      </span>
+                      <span>3명의 댄서</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Calendar className="w-4 h-4" />
                       <span>
-                        {new Date(project.updatedAt).toLocaleDateString('ko-KR')}
+                        {new Date(project.createdAt).toLocaleDateString('ko-KR')}
                       </span>
                     </div>
                   </div>
@@ -128,4 +131,3 @@ export default function ProjectListPage() {
     </div>
   );
 }
-

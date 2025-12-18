@@ -1,6 +1,9 @@
 /**
  * 스켈레톤 데이터 타입 정의
  * MediaPipe Pose 모델 기반 (33개 관절 포인트)
+ * 
+ * 이 타입은 MinIO에서 로드한 JSON 파일의 구조를 정의합니다.
+ * DB에는 메타데이터만 저장되고, 실제 프레임 데이터는 MinIO JSON에 있습니다.
  */
 
 // 단일 키포인트 (관절)
@@ -22,9 +25,9 @@ export interface PoseFrame {
   valid_mask?: number[];  // 각 키포인트의 유효성 (옵셔널)
 }
 
-// 스켈레톤 데이터 메타 정보
-export interface SkeletonMeta {
-  video_path: string;
+// 스켈레톤 JSON 메타 정보 (MinIO JSON 파일 내부)
+export interface SkeletonJsonMeta {
+  video_path?: string;
   fps: number;
   num_frames_raw: number;
   num_frames_sampled: number;
@@ -33,9 +36,9 @@ export interface SkeletonMeta {
   num_joints: number;      // 33 for MediaPipe
 }
 
-// 세그먼트에 포함된 전체 스켈레톤 데이터
-export interface SkeletonData {
-  meta: SkeletonMeta;
+// MinIO에서 로드한 스켈레톤 JSON 전체 구조
+export interface SkeletonJson {
+  meta: SkeletonJsonMeta;
   frames: PoseFrame[];
 }
 
@@ -110,3 +113,8 @@ export const SKELETON_CONNECTIONS: [number, number][] = [
   [POSE_LANDMARKS.RIGHT_SHOULDER, POSE_LANDMARKS.NOSE],
 ];
 
+/**
+ * 스켈레톤 JSON 캐시 타입
+ * object_key를 키로 하여 파싱된 JSON을 저장
+ */
+export type SkeletonCache = Map<string, SkeletonJson>;

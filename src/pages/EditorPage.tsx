@@ -1,26 +1,30 @@
-import React, { useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Play, Pause, SkipBack, Plus, RefreshCw } from 'lucide-react';
-import { Button } from '@/components/ui';
+import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson } from 'lucide-react';
+import { Button, FrontView, TopView } from '@/components';
 import { useProjectStore, useCurrentProject, useCurrentTime, useIsPlaying } from '@/stores';
 import { cn, formatTimeWithMs, formatTime } from '@/lib/utils';
-import { DANCER_COLORS, type DancerId, type Dancer, type Segment } from '@/types';
+import { TRACK_COLORS, type TrackSlot, type Track, type Layer, type SkeletonJson } from '@/types';
 
-// 타임라인 설정
-const PIXELS_PER_SECOND = 50; // 1초당 50px
-const TRACK_LABEL_WIDTH = 176; // w-44 = 11rem = 176px
+// 타임라인 줌 설정
+const MIN_PIXELS_PER_SECOND = 10;  // 최소 줌 (축소)
+const MAX_PIXELS_PER_SECOND = 200; // 최대 줌 (확대)
+const DEFAULT_PIXELS_PER_SECOND = 50;
 
-// 임시 플레이스홀더 컴포넌트들
+// ============================================
+// Placeholder Components
+// ============================================
+
 function TopViewPlaceholder() {
   return (
     <div className="h-full bg-surface-900 rounded-lg border border-surface-700 flex items-center justify-center">
       <div className="text-center">
         <div className="flex justify-center gap-4 mb-4">
-          {([1, 2, 3] as DancerId[]).map((id) => (
+          {([1, 2, 3] as TrackSlot[]).map((slot) => (
             <div
-              key={id}
+              key={slot}
               className="w-6 h-6 rounded-full"
-              style={{ backgroundColor: DANCER_COLORS[id] }}
+              style={{ backgroundColor: TRACK_COLORS[slot] }}
             />
           ))}
         </div>
@@ -36,15 +40,15 @@ function FrontViewPlaceholder() {
     <div className="h-full bg-surface-900 rounded-lg border border-surface-700 flex items-center justify-center">
       <div className="text-center">
         <div className="flex justify-center gap-6 mb-4">
-          {([1, 2, 3] as DancerId[]).map((id) => (
-            <div key={id} className="flex flex-col items-center gap-1">
+          {([1, 2, 3] as TrackSlot[]).map((slot) => (
+            <div key={slot} className="flex flex-col items-center gap-1">
               <div
                 className="w-4 h-4 rounded-full"
-                style={{ backgroundColor: DANCER_COLORS[id] }}
+                style={{ backgroundColor: TRACK_COLORS[slot] }}
               />
               <div
                 className="w-0.5 h-10"
-                style={{ backgroundColor: DANCER_COLORS[id] }}
+                style={{ backgroundColor: TRACK_COLORS[slot] }}
               />
             </div>
           ))}
@@ -56,13 +60,39 @@ function FrontViewPlaceholder() {
   );
 }
 
-// 타임라인 눈금자 (내용 영역만)
-function TimelineRulerContent({ duration }: { duration: number }) {
-  const totalWidth = duration * PIXELS_PER_SECOND;
+// ============================================
+// Timeline Components
+// ============================================
+
+// 타임라인 눈금자 (내용 영역만) + 드래그 줌
+const FPS = 24;
+const FRAME_DURATION = 1 / FPS; // ~0.0417초
+
+function TimelineRulerContent({ 
+  duration, 
+  pixelsPerSecond,
+  currentTime,
+  onZoom,
+  onSeek,
+}: { 
+  duration: number;
+  pixelsPerSecond: number;
+  currentTime: number;
+  onZoom: (delta: number) => void;
+  onSeek: (time: number) => void;
+}) {
+  const totalWidth = duration * pixelsPerSecond;
+  const rulerRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ startX: number; startPPS: number; isDragging: boolean } | null>(null);
   
-  // 눈금 간격 계산 (5초 단위 주요 눈금, 1초 단위 보조 눈금)
-  const majorInterval = 5;
-  const minorInterval = 1;
+  // 줌 레벨에 따라 눈금 간격 조정
+  const majorInterval = pixelsPerSecond < 30 ? 10 : pixelsPerSecond < 80 ? 5 : 2;
+  const minorInterval = pixelsPerSecond < 30 ? 5 : 1;
+  
+  // 프레임 눈금 표시 여부 (충분히 확대했을 때만)
+  const showFrameTicks = pixelsPerSecond >= 100;
+  // 프레임 라벨 표시 여부 (더 확대했을 때)
+  const showFrameLabels = pixelsPerSecond >= 150;
   
   const majorTicks: number[] = [];
   const minorTicks: number[] = [];
@@ -75,26 +105,104 @@ function TimelineRulerContent({ duration }: { duration: number }) {
     }
   }
 
+  // 프레임 눈금 계산 (보이는 영역 최적화를 위해 useMemo 사용)
+  const frameTicks = useMemo(() => {
+    if (!showFrameTicks) return [];
+    
+    const ticks: Array<{ time: number; frame: number; isKeyFrame: boolean }> = [];
+    const totalFrames = Math.ceil(duration * FPS);
+    
+    for (let f = 0; f <= totalFrames; f++) {
+      const time = f / FPS;
+      // 초 단위 눈금과 겹치지 않게 (정수 초는 제외)
+      if (Math.abs(time - Math.round(time)) < 0.001) continue;
+      
+      ticks.push({
+        time,
+        frame: f % FPS, // 해당 초 내에서의 프레임 번호 (0-23)
+        isKeyFrame: f % 6 === 0, // 6프레임마다 강조 (4등분)
+      });
+    }
+    return ticks;
+  }, [duration, showFrameTicks]);
+
+  // 드래그로 줌 조절, 클릭으로 시간 이동
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return; // 왼쪽 클릭만
+    dragRef.current = { startX: e.clientX, startPPS: pixelsPerSecond, isDragging: false };
+    
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!dragRef.current) return;
+      const deltaX = moveEvent.clientX - dragRef.current.startX;
+      
+      // 5px 이상 움직이면 드래그로 판정
+      if (Math.abs(deltaX) > 5) {
+        dragRef.current.isDragging = true;
+        onZoom(deltaX * 0.5);
+      }
+    };
+    
+    const handleMouseUp = (upEvent: MouseEvent) => {
+      // 드래그가 아니었으면 클릭으로 처리 (시간 이동)
+      if (dragRef.current && !dragRef.current.isDragging && rulerRef.current) {
+        const rect = rulerRef.current.getBoundingClientRect();
+        const x = upEvent.clientX - rect.left;
+        const time = Math.max(0, Math.min(duration, x / pixelsPerSecond));
+        onSeek(time);
+      }
+      dragRef.current = null;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
   return (
     <div 
-      className="h-8 bg-surface-900/30 relative"
+      ref={rulerRef}
+      className="h-8 bg-surface-900/30 relative cursor-pointer select-none"
       style={{ width: totalWidth }}
+      onMouseDown={handleMouseDown}
+      title="클릭: 시간 이동 / 드래그: 줌 조절"
     >
-      {/* 보조 눈금 (1초 단위) */}
+      {/* 프레임 눈금 (가장 아래 레이어) */}
+      {frameTicks.map(({ time, frame, isKeyFrame }) => (
+        <div
+          key={`frame-${time.toFixed(4)}`}
+          className="absolute top-0 pointer-events-none flex flex-col items-center"
+          style={{ left: time * pixelsPerSecond }}
+        >
+          <div 
+            className={cn(
+              'w-px',
+              isKeyFrame ? 'h-2 bg-accent-600/50' : 'h-1 bg-surface-700'
+            )}
+          />
+          {showFrameLabels && isKeyFrame && (
+            <span className="text-[8px] text-accent-600/60 font-mono">
+              {frame}
+            </span>
+          )}
+        </div>
+      ))}
+      
+      {/* 초 단위 보조 눈금 */}
       {minorTicks.map((t) => (
         <div
           key={`minor-${t}`}
-          className="absolute top-0 w-px h-2 bg-surface-600"
-          style={{ left: t * PIXELS_PER_SECOND }}
+          className="absolute top-0 w-px h-2 bg-surface-600 pointer-events-none"
+          style={{ left: t * pixelsPerSecond }}
         />
       ))}
       
-      {/* 주요 눈금 (5초 단위) */}
+      {/* 초 단위 주요 눈금 */}
       {majorTicks.map((t) => (
         <div
           key={`major-${t}`}
-          className="absolute top-0 flex flex-col items-start"
-          style={{ left: t * PIXELS_PER_SECOND }}
+          className="absolute top-0 flex flex-col items-start pointer-events-none"
+          style={{ left: t * pixelsPerSecond }}
         >
           <div className="w-px h-4 bg-surface-500" />
           <span className="text-[10px] text-surface-500 font-mono ml-1 whitespace-nowrap">
@@ -102,57 +210,91 @@ function TimelineRulerContent({ duration }: { duration: number }) {
           </span>
         </div>
       ))}
+      
+      {/* Playhead (현재 시간 표시) */}
+      <div
+        className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-10"
+        style={{ left: currentTime * pixelsPerSecond }}
+      >
+        <div className="absolute -top-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-red-500 rounded-full" />
+      </div>
     </div>
   );
 }
 
-// 세그먼트 블록 컴포넌트
-function SegmentBlock({ segment, color }: { segment: Segment; color: string }) {
-  const width = segment.duration * PIXELS_PER_SECOND;
-  const left = segment.startTime * PIXELS_PER_SECOND;
+// Playhead 컴포넌트 (타임라인 전체에 걸친 세로선)
+function Playhead({ currentTime, pixelsPerSecond }: { currentTime: number; pixelsPerSecond: number }) {
+  return (
+    <div
+      className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-20"
+      style={{ left: currentTime * pixelsPerSecond }}
+    />
+  );
+}
+
+// 레이어 블록 컴포넌트
+function LayerBlock({ layer, color, pixelsPerSecond }: { layer: Layer; color: string; pixelsPerSecond: number }) {
+  const width = (layer.endSec - layer.startSec) * pixelsPerSecond;
+  const left = layer.startSec * pixelsPerSecond;
+  const isProcessing = layer.skeleton.status === 'PROCESSING';
+  const isFailed = layer.skeleton.status === 'FAILED';
 
   return (
     <div
       className={cn(
         'absolute top-1 bottom-1 rounded',
-        'border flex items-center px-2 overflow-hidden',
-        segment.isProcessing && 'animate-pulse'
+        'border flex items-center px-2 overflow-hidden cursor-pointer',
+        'hover:brightness-110 transition-all',
+        isProcessing && 'animate-pulse',
+        isFailed && 'opacity-50'
       )}
       style={{
         left,
-        width,
+        width: Math.max(width, 20), // 최소 너비
         backgroundColor: `${color}30`,
-        borderColor: `${color}60`,
+        borderColor: isFailed ? '#ef4444' : `${color}60`,
       }}
-      title={`${segment.name} (${segment.duration.toFixed(1)}s)`}
+      title={`${layer.label || 'Layer'} (${(layer.endSec - layer.startSec).toFixed(1)}s) - Priority: ${layer.priority}`}
     >
       <span 
         className="text-xs font-medium truncate"
-        style={{ color }}
+        style={{ color: isFailed ? '#ef4444' : color }}
       >
-        {segment.name}
+        {layer.label || `Layer ${layer.layerId}`}
+        {isProcessing && ' ⏳'}
+        {isFailed && ' ❌'}
       </span>
     </div>
   );
 }
 
-// 댄서 트랙 레이블
-function DancerTrackLabel({ 
-  dancer,
+// 트랙 레이블
+function TrackLabel({ 
+  track,
   onUploadVideo,
+  onUploadJson,
 }: { 
-  dancer: Dancer;
-  onUploadVideo: (dancerId: DancerId, file: File) => void;
+  track: Track;
+  onUploadVideo: (trackId: number, file: File) => void;
+  onUploadJson: (trackId: number, file: File) => void;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const color = DANCER_COLORS[dancer.id];
-  const segmentCount = dancer.track.segments.length;
+  const videoInputRef = useRef<HTMLInputElement>(null);
+  const jsonInputRef = useRef<HTMLInputElement>(null);
+  const color = TRACK_COLORS[track.slot];
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      onUploadVideo(dancer.id, file);
-      e.target.value = ''; // Reset input
+      onUploadVideo(track.trackId, file);
+      e.target.value = '';
+    }
+  };
+
+  const handleJsonChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onUploadJson(track.trackId, file);
+      e.target.value = '';
     }
   };
 
@@ -163,62 +305,72 @@ function DancerTrackLabel({
         style={{ backgroundColor: color }}
       />
       <span className="text-sm text-surface-300 truncate flex-1">
-        {dancer.name}
+        {track.displayName || `Dancer ${track.slot}`}
       </span>
       
-      {/* 업로드 버튼 */}
+      {/* 영상 업로드 버튼 */}
       <input
-        ref={inputRef}
+        ref={videoInputRef}
         type="file"
         accept="video/*"
-        onChange={handleFileChange}
+        onChange={handleVideoChange}
         className="hidden"
       />
       <button
-        onClick={() => inputRef.current?.click()}
-        title={segmentCount > 0 ? '영상 변경' : '영상 업로드'}
+        onClick={() => videoInputRef.current?.click()}
+        title="영상 업로드"
         className={cn(
           'flex items-center justify-center w-7 h-7 rounded transition-all',
-          segmentCount > 0 
-            ? 'bg-surface-700/50 hover:bg-surface-600 text-surface-200 hover:text-white'
-            : 'bg-surface-700 hover:bg-surface-600 text-surface-400 hover:text-white',
+          'bg-surface-700 hover:bg-surface-600 text-surface-400 hover:text-white',
           'border border-surface-600 hover:border-surface-500'
         )}
-        style={{ 
-          boxShadow: segmentCount > 0 ? `0 0 10px ${color}50` : undefined,
-          borderColor: segmentCount > 0 ? `${color}50` : undefined,
-          color: segmentCount > 0 ? color : undefined,
-        }}
       >
-        {segmentCount > 0 ? (
-          <RefreshCw className="w-3.5 h-3.5" />
-        ) : (
-          <Plus className="w-4 h-4" />
+        <Video className="w-3.5 h-3.5" />
+      </button>
+
+      {/* JSON 업로드 버튼 */}
+      <input
+        ref={jsonInputRef}
+        type="file"
+        accept=".json"
+        onChange={handleJsonChange}
+        className="hidden"
+      />
+      <button
+        onClick={() => jsonInputRef.current?.click()}
+        title="스켈레톤 JSON 업로드"
+        className={cn(
+          'flex items-center justify-center w-7 h-7 rounded transition-all',
+          'bg-surface-700 hover:bg-surface-600 text-surface-400 hover:text-white',
+          'border border-surface-600 hover:border-surface-500'
         )}
+      >
+        <FileJson className="w-3.5 h-3.5" />
       </button>
     </div>
   );
 }
 
-// 댄서 트랙 내용
-function DancerTrackContent({ 
-  dancer,
+// 트랙 내용
+function TrackContent({ 
+  track,
   duration,
+  pixelsPerSecond,
 }: { 
-  dancer: Dancer;
+  track: Track;
   duration: number;
+  pixelsPerSecond: number;
 }) {
-  const color = DANCER_COLORS[dancer.id];
-  const totalWidth = duration * PIXELS_PER_SECOND;
+  const color = TRACK_COLORS[track.slot];
+  const totalWidth = duration * pixelsPerSecond;
 
   return (
     <div 
       className="h-14 bg-surface-900/50 relative timeline-grid border-b border-surface-700"
       style={{ width: totalWidth }}
     >
-      {/* 세그먼트 블록들 */}
-      {dancer.track.segments.map((segment) => (
-        <SegmentBlock key={segment.id} segment={segment} color={color} />
+      {track.layers.map((layer) => (
+        <LayerBlock key={layer.layerId} layer={layer} color={color} pixelsPerSecond={pixelsPerSecond} />
       ))}
     </div>
   );
@@ -234,9 +386,9 @@ function MusicTrackLabel() {
 }
 
 // 음악 트랙 내용
-function MusicTrackContent({ duration, musicDuration }: { duration: number; musicDuration: number }) {
-  const totalWidth = duration * PIXELS_PER_SECOND;
-  const musicWidth = musicDuration * PIXELS_PER_SECOND;
+function MusicTrackContent({ duration, musicDuration, pixelsPerSecond }: { duration: number; musicDuration: number; pixelsPerSecond: number }) {
+  const totalWidth = duration * pixelsPerSecond;
+  const musicWidth = musicDuration * pixelsPerSecond;
   
   return (
     <div 
@@ -258,6 +410,10 @@ function RulerLabel() {
   );
 }
 
+// ============================================
+// Main Component
+// ============================================
+
 export default function EditorPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
@@ -265,35 +421,145 @@ export default function EditorPage() {
   const project = useCurrentProject();
   const currentTime = useCurrentTime();
   const isPlaying = useIsPlaying();
-  const projects = useProjectStore(state => state.projects);
   const setCurrentProject = useProjectStore(state => state.setCurrentProject);
   const setCurrentTime = useProjectStore(state => state.setCurrentTime);
   const togglePlayback = useProjectStore(state => state.togglePlayback);
-  const addSegment = useProjectStore(state => state.addSegment);
+  const addLayer = useProjectStore(state => state.addLayer);
+
+  // 타임라인 줌 상태
+  const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND);
+  
+  // 스켈레톤 데이터 캐시 (layerId → SkeletonJson)
+  const [skeletonCache, setSkeletonCache] = useState<Map<number, SkeletonJson>>(new Map());
+  
+  // 줌 핸들러 (드래그 delta 기반)
+  const handleZoom = useCallback((delta: number) => {
+    setPixelsPerSecond(prev => {
+      const newValue = prev + delta;
+      return Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, newValue));
+    });
+  }, []);
+  
+  // 스켈레톤 캐시에 추가
+  const addToSkeletonCache = useCallback((layerId: number, data: SkeletonJson) => {
+    setSkeletonCache(prev => new Map(prev).set(layerId, data));
+  }, []);
 
   // 프로젝트 로드
+  const getProjectById = useProjectStore(state => state.getProjectById);
+  
   useEffect(() => {
     if (!projectId) return;
     
-    // 현재 프로젝트가 없거나 다른 프로젝트면 로드
-    if (!project || project.id !== projectId) {
-      const found = projects.find(p => p.id === projectId);
-      if (found) {
-        setCurrentProject(found);
+    const numericId = parseInt(projectId, 10);
+    
+    if (!project || project.id !== numericId) {
+      // TODO: 백엔드 연동 시 API 호출로 대체
+      // const editState = await projectApi.getEditState(numericId);
+      // setCurrentProject(transformEditState(editState));
+      
+      // 임시: 프로젝트 데이터에서 찾기
+      const foundProject = getProjectById(numericId);
+      if (foundProject) {
+        setCurrentProject(foundProject);
       } else {
-        // 프로젝트를 찾을 수 없으면 목록으로
+        // 프로젝트를 찾을 수 없으면 목록으로 이동
         navigate('/');
       }
     }
-  }, [projectId, project, projects, setCurrentProject, navigate]);
+  }, [projectId, project, getProjectById, setCurrentProject, navigate]);
 
-  // 동영상 업로드 핸들러 - 영상 길이 자동 파악
-  const handleUploadVideo = useCallback((dancerId: DancerId, file: File) => {
-    console.log(`Uploading video for Dancer ${dancerId}:`, file.name);
+  // 타임라인 전체 길이 계산
+  const timelineDuration = useMemo(() => {
+    if (!project) return 0;
+    
+    const trackEndTimes = project.tracks.map(track => 
+      track.layers.reduce((max, layer) => Math.max(max, layer.endSec), 0)
+    );
+    
+    return Math.max(project.music.durationSec, ...trackEndTimes);
+  }, [project]);
+
+  // 오디오 ref
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  
+  // 오디오 element 생성
+  useEffect(() => {
+    if (project?.music.objectKey) {
+      const audio = new Audio(project.music.objectKey);
+      audioRef.current = audio;
+      
+      return () => {
+        audio.pause();
+        audioRef.current = null;
+      };
+    }
+  }, [project?.music.objectKey]);
+
+  // 재생 애니메이션
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+  
+  useEffect(() => {
+    if (!isPlaying || !project) return;
+    
+    // 오디오 재생
+    if (audioRef.current) {
+      audioRef.current.currentTime = currentTimeRef.current;
+      audioRef.current.play().catch(e => console.log('Audio play failed:', e));
+    }
+    
+    let lastTime = performance.now();
+    let animationId: number;
+    
+    const animate = (now: number) => {
+      const delta = (now - lastTime) / 1000; // 초 단위
+      lastTime = now;
+      
+      const newTime = currentTimeRef.current + delta;
+      
+      // 끝에 도달하면 정지
+      if (newTime >= timelineDuration) {
+        currentTimeRef.current = timelineDuration;
+        setCurrentTime(timelineDuration);
+        togglePlayback();
+        return;
+      }
+      
+      // ref와 state 둘 다 업데이트
+      currentTimeRef.current = newTime;
+      setCurrentTime(newTime);
+      animationId = requestAnimationFrame(animate);
+    };
+    
+    animationId = requestAnimationFrame(animate);
+    
+    return () => {
+      cancelAnimationFrame(animationId);
+      // 오디오 일시정지
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+    };
+  }, [isPlaying, project, timelineDuration, setCurrentTime, togglePlayback]);
+
+  // 시간 이동 (seek) 핸들러
+  const handleSeek = useCallback((time: number) => {
+    setCurrentTime(time);
+    currentTimeRef.current = time;
+    
+    // 음악 재생 위치도 동기화
+    if (audioRef.current) {
+      audioRef.current.currentTime = time;
+    }
+  }, [setCurrentTime]);
+
+  // 동영상 업로드 핸들러
+  const handleUploadVideo = useCallback((trackId: number, file: File) => {
+    console.log(`Uploading video for Track ${trackId}:`, file.name);
     
     const videoUrl = URL.createObjectURL(file);
     
-    // 비디오 요소를 만들어서 duration 파악
     const video = document.createElement('video');
     video.preload = 'metadata';
     
@@ -301,23 +567,42 @@ export default function EditorPage() {
       const duration = video.duration;
       console.log(`Video duration: ${duration}s`);
       
-      // 현재 댄서의 마지막 세그먼트 종료 시간 계산
-      const dancer = project?.dancers.find(d => d.id === dancerId);
-      const lastEndTime = dancer?.track.segments.reduce((max, seg) => {
-        return Math.max(max, seg.startTime + seg.duration);
-      }, 0) ?? 0;
+      const track = project?.tracks.find(t => t.trackId === trackId);
+      const lastEndTime = track?.layers.reduce((max, layer) => 
+        Math.max(max, layer.endSec), 0
+      ) ?? 0;
       
-      addSegment(dancerId, {
-        id: crypto.randomUUID(),
-        name: file.name.replace(/\.[^/.]+$/, ''), // 확장자 제거
-        startTime: lastEndTime, // 이전 세그먼트 뒤에 배치
-        duration: duration,
-        skeletonData: null, // TODO: 백엔드에서 스켈레톤 추출 후 채워짐
-        videoUrl,
-        isProcessing: true,
+      // 새 레이어의 priority 계산 (가장 높은 값 + 1)
+      const maxPriority = track?.layers.reduce((max, layer) => 
+        Math.max(max, layer.priority), 0
+      ) ?? 0;
+      
+      // TODO: 백엔드 연동 시 API 호출로 대체
+      // 1. layerApi.initUpload() - presigned URL 발급
+      // 2. uploadToMinIO() - MinIO에 업로드
+      // 3. layerApi.create() - 레이어 생성
+      
+      // 임시: 로컬에서 레이어 추가
+      addLayer(trackId, {
+        layerId: Date.now(),
+        trackId,
+        startSec: lastEndTime,
+        endSec: lastEndTime + duration,
+        priority: maxPriority + 1,
+        label: file.name.replace(/\.[^/.]+$/, ''),
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        skeleton: {
+          sourceId: Date.now(),
+          status: 'PROCESSING',
+          objectKey: null,
+          fps: 24,
+          numFrames: Math.floor(duration * 24),
+          numJoints: 33,
+          poseModel: 'mediapipe_pose',
+        },
       });
       
-      // 정리
       URL.revokeObjectURL(video.src);
     };
     
@@ -327,22 +612,125 @@ export default function EditorPage() {
     };
     
     video.src = videoUrl;
-  }, [project, addSegment]);
+  }, [project, addLayer]);
 
-  // 타임라인 전체 길이 계산 (음악 + 모든 댄서 세그먼트 중 최대값)
-  const timelineDuration = useMemo(() => {
-    if (!project) return 0;
+  // JSON 업로드 핸들러
+  const handleUploadJson = useCallback((trackId: number, file: File) => {
+    console.log(`Uploading skeleton JSON for Track ${trackId}:`, file.name);
     
-    // 각 댄서의 마지막 세그먼트 종료 시간
-    const dancerEndTimes = project.dancers.map(dancer => 
-      dancer.track.segments.reduce((max, seg) => 
-        Math.max(max, seg.startTime + seg.duration), 0
-      )
-    );
+    const reader = new FileReader();
     
-    // 음악 길이와 모든 댄서 종료 시간 중 최대값
-    return Math.max(project.musicDuration, ...dancerEndTimes);
-  }, [project]);
+    reader.onload = (e) => {
+      try {
+        const rawText = e.target?.result as string;
+        console.log('JSON file size:', rawText.length, 'bytes');
+        console.log('JSON preview:', rawText.substring(0, 200));
+        
+        const json = JSON.parse(rawText);
+        console.log('Parsed JSON:', json);
+        
+        // 구조 검증
+        if (!json.meta && !json.frames) {
+          throw new Error('Invalid skeleton JSON: missing meta or frames');
+        }
+        
+        const meta = json.meta || {};
+        const frames = json.frames || [];
+        
+        console.log('Meta:', meta);
+        console.log('Frames count:', frames.length);
+        
+        const fps = meta.fps || 24;
+        const numFrames = frames.length || meta.num_frames_sampled || 0;
+        const duration = numFrames / fps;
+        
+        if (numFrames === 0) {
+          throw new Error('No frames found in skeleton JSON');
+        }
+        
+        const track = project?.tracks.find(t => t.trackId === trackId);
+        const lastEndTime = track?.layers.reduce((max, layer) => 
+          Math.max(max, layer.endSec), 0
+        ) ?? 0;
+        
+        const maxPriority = track?.layers.reduce((max, layer) => 
+          Math.max(max, layer.priority), 0
+        ) ?? 0;
+        
+        // TODO: 백엔드 연동 시 API 호출로 대체
+        // 1. layerApi.initUpload() - presigned URL 발급
+        // 2. uploadToMinIO() - MinIO에 JSON 업로드
+        // 3. layerApi.create() - 레이어 생성 (SKELETON_JSON 타입)
+        
+        const layerId = Date.now();
+        
+        addLayer(trackId, {
+          layerId,
+          trackId,
+          startSec: lastEndTime,
+          endSec: lastEndTime + duration,
+          priority: maxPriority + 1,
+          label: file.name.replace(/\.[^/.]+$/, ''),
+          fadeInSec: 0,
+          fadeOutSec: 0,
+          skeleton: {
+            sourceId: Date.now(),
+            status: 'READY', // JSON 직접 업로드는 바로 READY
+            objectKey: null,
+            fps,
+            numFrames,
+            numJoints: meta.num_joints || 33,
+            poseModel: meta.pose_model || 'mediapipe_pose',
+          },
+        });
+        
+        // 스켈레톤 데이터를 캐시에 저장
+        addToSkeletonCache(layerId, json as SkeletonJson);
+        
+        console.log(`✅ JSON loaded: ${numFrames} frames, ${duration.toFixed(1)}s, ${fps}fps`);
+      } catch (err) {
+        console.error('❌ Failed to parse skeleton JSON:', err);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        alert(`스켈레톤 JSON 파일을 파싱할 수 없습니다.\n\n에러: ${errorMessage}`);
+      }
+    };
+    
+    reader.onerror = () => {
+      console.error('Failed to read JSON file');
+    };
+    
+    reader.readAsText(file);
+  }, [project, addLayer, addToSkeletonCache]);
+
+  // 각 트랙에서 현재 시간에 활성화된 레이어의 스켈레톤 데이터
+  const frontViewDancers = useMemo(() => {
+    if (!project) return [];
+    
+    return project.tracks.map(track => {
+      // 현재 시간에 활성화된 레이어 찾기 (priority 최대)
+      const activeLayers = track.layers.filter(
+        layer => layer.startSec <= currentTime && currentTime < layer.endSec
+      );
+      
+      const activeLayer = activeLayers.length > 0
+        ? activeLayers.reduce((max, layer) => layer.priority > max.priority ? layer : max)
+        : null;
+      
+      // 활성 레이어가 있고 READY 상태면 캐시에서 스켈레톤 데이터 가져오기
+      const skeletonData = activeLayer?.skeleton.status === 'READY'
+        ? skeletonCache.get(activeLayer.layerId) || null
+        : null;
+      
+      // 스켈레톤 데이터가 있으면 레이어 시작 시간 기준으로 로컬 시간 계산
+      const localTime = activeLayer ? currentTime - activeLayer.startSec : 0;
+      
+      return {
+        slot: track.slot,
+        skeletonData,
+        localTime,
+      };
+    });
+  }, [project, currentTime, skeletonCache]);
 
   if (!project) {
     return (
@@ -366,25 +754,53 @@ export default function EditorPage() {
         <div className="h-6 w-px bg-surface-700" />
         
         <h1 className="font-medium text-white truncate">
-          {project.name}
+          {project.title}
         </h1>
         
         <div className="ml-auto flex items-center gap-2">
           <span className="text-xs text-surface-500 font-mono">
-            {project.musicName}
+            {project.music.objectKey?.split('/').pop() || 'No music'}
           </span>
         </div>
       </header>
 
       {/* 메인 영역 */}
       <div className="flex-1 flex flex-col min-h-0">
-        {/* 프리뷰 영역 (Top + Front View) */}
+        {/* 프리뷰 영역 */}
         <div className="flex-1 min-h-0 p-4 flex gap-4">
           <div className="flex-1 min-w-0">
-            <TopViewPlaceholder />
+            {/* Top View - 무대 배치도 */}
+            <div className="h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden">
+              {project.tracks.some(t => t.positionKeyframes.length > 0) ? (
+                <TopView 
+                  dancers={project.tracks.map(t => ({
+                    slot: t.slot,
+                    positionKeyframes: t.positionKeyframes,
+                  }))}
+                  currentTime={currentTime}
+                  showPaths={true}
+                  showKeyframes={true}
+                />
+              ) : (
+                <TopViewPlaceholder />
+              )}
+            </div>
           </div>
-          <div className="flex-1 min-w-0">
-            <FrontViewPlaceholder />
+          <div className="flex-1 min-w-0 h-full">
+            {/* Front View - 스켈레톤 렌더링 */}
+            <div className="h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden">
+              {frontViewDancers.some(d => d.skeletonData) ? (
+                <FrontView 
+                  dancers={frontViewDancers.map(d => ({
+                    slot: d.slot,
+                    skeletonData: d.skeletonData,
+                    localTime: d.localTime,
+                  }))}
+                />
+              ) : (
+                <FrontViewPlaceholder />
+              )}
+            </div>
           </div>
         </div>
 
@@ -393,15 +809,18 @@ export default function EditorPage() {
           {/* 재생 컨트롤 */}
           <div className="h-12 border-b border-surface-700 flex items-center px-4 gap-4">
             <div className="flex items-center gap-2">
+              {/* 처음으로 */}
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setCurrentTime(0)}
                 className="w-8 h-8 p-0"
+                title="처음으로"
               >
                 <SkipBack className="w-4 h-4" />
               </Button>
               
+              {/* 재생/일시정지 */}
               <Button
                 variant="ghost"
                 size="sm"
@@ -410,6 +829,7 @@ export default function EditorPage() {
                   'w-10 h-10 p-0 rounded-full',
                   isPlaying && 'bg-accent-600 hover:bg-accent-500'
                 )}
+                title={isPlaying ? '일시정지' : '재생'}
               >
                 {isPlaying ? (
                   <Pause className="w-5 h-5" />
@@ -417,12 +837,26 @@ export default function EditorPage() {
                   <Play className="w-5 h-5 ml-0.5" />
                 )}
               </Button>
+              
+              {/* 정지 (처음부터) */}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (isPlaying) togglePlayback();
+                  setCurrentTime(0);
+                }}
+                className="w-8 h-8 p-0"
+                title="정지"
+              >
+                <Square className="w-4 h-4" />
+              </Button>
             </div>
             
             <div className="font-mono text-sm text-surface-300">
               <span className="text-white">{formatTimeWithMs(currentTime)}</span>
               <span className="text-surface-500 mx-1">/</span>
-              <span>{formatTimeWithMs(project.musicDuration)}</span>
+              <span>{formatTimeWithMs(project.music.durationSec)}</span>
             </div>
           </div>
 
@@ -432,27 +866,42 @@ export default function EditorPage() {
             <div className="w-44 flex-shrink-0 overflow-y-auto">
               <RulerLabel />
               <MusicTrackLabel />
-              {project.dancers.map((dancer) => (
-                <DancerTrackLabel
-                  key={dancer.id}
-                  dancer={dancer}
+              {project.tracks.map((track) => (
+                <TrackLabel
+                  key={track.trackId}
+                  track={track}
                   onUploadVideo={handleUploadVideo}
+                  onUploadJson={handleUploadJson}
                 />
               ))}
             </div>
             
             {/* 오른쪽: 타임라인 내용 (스크롤 가능) */}
             <div className="flex-1 overflow-x-auto overflow-y-auto">
-              <div style={{ minWidth: timelineDuration * PIXELS_PER_SECOND }}>
-                <TimelineRulerContent duration={timelineDuration} />
-                <MusicTrackContent duration={timelineDuration} musicDuration={project.musicDuration} />
-                {project.dancers.map((dancer) => (
-                  <DancerTrackContent
-                    key={dancer.id}
-                    dancer={dancer}
+              <div className="relative" style={{ minWidth: timelineDuration * pixelsPerSecond }}>
+                <TimelineRulerContent 
+                  duration={timelineDuration} 
+                  pixelsPerSecond={pixelsPerSecond}
+                  currentTime={currentTime}
+                  onZoom={handleZoom}
+                  onSeek={handleSeek}
+                />
+                <MusicTrackContent 
+                  duration={timelineDuration} 
+                  musicDuration={project.music.durationSec} 
+                  pixelsPerSecond={pixelsPerSecond}
+                />
+                {project.tracks.map((track) => (
+                  <TrackContent
+                    key={track.trackId}
+                    track={track}
                     duration={timelineDuration}
+                    pixelsPerSecond={pixelsPerSecond}
                   />
                 ))}
+                
+                {/* Playhead - 타임라인 전체에 걸친 세로선 */}
+                <Playhead currentTime={currentTime} pixelsPerSecond={pixelsPerSecond} />
               </div>
             </div>
           </div>
@@ -461,4 +910,3 @@ export default function EditorPage() {
     </div>
   );
 }
-
