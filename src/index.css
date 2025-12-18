@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: #0a0a0f;
+  --color-surface: #14141a;
+  --color-border: #26262e;
+  --color-text: #e5e5ea;
+  --color-text-muted: #8e8e99;
+  --color-accent: #6366f1;
+  --color-dancer-1: #f472b6;
+  --color-dancer-2: #34d399;
+  --color-dancer-3: #fbbf24;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Outfit', system-ui, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 스크롤바 커스텀 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* 타임라인 그리드 배경 패턴 */
+.timeline-grid {
+  background-image: 
+    linear-gradient(to right, var(--color-border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-border) 1px, transparent 1px);
+  background-size: 50px 100%;
+}
+
+/* 글로우 효과 */
+.glow-accent {
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
+}
+
+.glow-dancer-1 {
+  box-shadow: 0 0 15px rgba(244, 114, 182, 0.4);
+}
+
+.glow-dancer-2 {
+  box-shadow: 0 0 15px rgba(52, 211, 153, 0.4);
+}
+
+.glow-dancer-3 {
+  box-shadow: 0 0 15px rgba(251, 191, 36, 0.4);
+}
+
