@@ -83,9 +83,9 @@ export const POSE_LANDMARKS = {
 } as const;
 
 /**
- * 스켈레톤 렌더링을 위한 본(bone) 연결 정의
+ * MediaPipe 33관절용 본(bone) 연결 정의
  */
-export const SKELETON_CONNECTIONS: [number, number][] = [
+export const SKELETON_CONNECTIONS_MP33: [number, number][] = [
   // 몸통
   [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.RIGHT_SHOULDER],
   [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.LEFT_HIP],
@@ -112,6 +112,106 @@ export const SKELETON_CONNECTIONS: [number, number][] = [
   [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.NOSE],
   [POSE_LANDMARKS.RIGHT_SHOULDER, POSE_LANDMARKS.NOSE],
 ];
+
+/**
+ * COCO17 관절 인덱스 맵핑 (백엔드 스켈레톤 JSON 형식)
+ * joints: ["nose", "l_eye", "r_eye", "l_ear", "r_ear", "l_shoulder", "r_shoulder", 
+ *          "l_elbow", "r_elbow", "l_wrist", "r_wrist", "l_hip", "r_hip", 
+ *          "l_knee", "r_knee", "l_ankle", "r_ankle"]
+ */
+export const COCO17_LANDMARKS = {
+  NOSE: 0,
+  LEFT_EYE: 1,
+  RIGHT_EYE: 2,
+  LEFT_EAR: 3,
+  RIGHT_EAR: 4,
+  LEFT_SHOULDER: 5,
+  RIGHT_SHOULDER: 6,
+  LEFT_ELBOW: 7,
+  RIGHT_ELBOW: 8,
+  LEFT_WRIST: 9,
+  RIGHT_WRIST: 10,
+  LEFT_HIP: 11,
+  RIGHT_HIP: 12,
+  LEFT_KNEE: 13,
+  RIGHT_KNEE: 14,
+  LEFT_ANKLE: 15,
+  RIGHT_ANKLE: 16,
+} as const;
+
+/**
+ * COCO17용 본(bone) 연결 정의
+ */
+export const SKELETON_CONNECTIONS_COCO17: [number, number][] = [
+  // 몸통
+  [COCO17_LANDMARKS.LEFT_SHOULDER, COCO17_LANDMARKS.RIGHT_SHOULDER],
+  [COCO17_LANDMARKS.LEFT_SHOULDER, COCO17_LANDMARKS.LEFT_HIP],
+  [COCO17_LANDMARKS.RIGHT_SHOULDER, COCO17_LANDMARKS.RIGHT_HIP],
+  [COCO17_LANDMARKS.LEFT_HIP, COCO17_LANDMARKS.RIGHT_HIP],
+  
+  // 왼팔
+  [COCO17_LANDMARKS.LEFT_SHOULDER, COCO17_LANDMARKS.LEFT_ELBOW],
+  [COCO17_LANDMARKS.LEFT_ELBOW, COCO17_LANDMARKS.LEFT_WRIST],
+  
+  // 오른팔
+  [COCO17_LANDMARKS.RIGHT_SHOULDER, COCO17_LANDMARKS.RIGHT_ELBOW],
+  [COCO17_LANDMARKS.RIGHT_ELBOW, COCO17_LANDMARKS.RIGHT_WRIST],
+  
+  // 왼다리
+  [COCO17_LANDMARKS.LEFT_HIP, COCO17_LANDMARKS.LEFT_KNEE],
+  [COCO17_LANDMARKS.LEFT_KNEE, COCO17_LANDMARKS.LEFT_ANKLE],
+  
+  // 오른다리
+  [COCO17_LANDMARKS.RIGHT_HIP, COCO17_LANDMARKS.RIGHT_KNEE],
+  [COCO17_LANDMARKS.RIGHT_KNEE, COCO17_LANDMARKS.RIGHT_ANKLE],
+  
+  // 얼굴 (간소화)
+  [COCO17_LANDMARKS.LEFT_SHOULDER, COCO17_LANDMARKS.NOSE],
+  [COCO17_LANDMARKS.RIGHT_SHOULDER, COCO17_LANDMARKS.NOSE],
+];
+
+/**
+ * 관절 수에 따라 적절한 연결 정보 반환
+ */
+export function getSkeletonConnections(numJoints: number): [number, number][] {
+  if (numJoints === 17) {
+    return SKELETON_CONNECTIONS_COCO17;
+  }
+  return SKELETON_CONNECTIONS_MP33;
+}
+
+/**
+ * 관절 수에 따라 주요 관절 인덱스 반환
+ */
+export function getMainJointIndices(numJoints: number): number[] {
+  if (numJoints === 17) {
+    return [
+      COCO17_LANDMARKS.NOSE,
+      COCO17_LANDMARKS.LEFT_SHOULDER,
+      COCO17_LANDMARKS.RIGHT_SHOULDER,
+      COCO17_LANDMARKS.LEFT_HIP,
+      COCO17_LANDMARKS.RIGHT_HIP,
+      COCO17_LANDMARKS.LEFT_WRIST,
+      COCO17_LANDMARKS.RIGHT_WRIST,
+      COCO17_LANDMARKS.LEFT_ANKLE,
+      COCO17_LANDMARKS.RIGHT_ANKLE,
+    ];
+  }
+  return [
+    POSE_LANDMARKS.NOSE,
+    POSE_LANDMARKS.LEFT_SHOULDER,
+    POSE_LANDMARKS.RIGHT_SHOULDER,
+    POSE_LANDMARKS.LEFT_HIP,
+    POSE_LANDMARKS.RIGHT_HIP,
+    POSE_LANDMARKS.LEFT_WRIST,
+    POSE_LANDMARKS.RIGHT_WRIST,
+    POSE_LANDMARKS.LEFT_ANKLE,
+    POSE_LANDMARKS.RIGHT_ANKLE,
+  ];
+}
+
+// 하위 호환성을 위한 기본 export
+export const SKELETON_CONNECTIONS = SKELETON_CONNECTIONS_MP33;
 
 /**
  * 스켈레톤 JSON 캐시 타입

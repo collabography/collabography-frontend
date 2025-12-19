@@ -1,5 +1,10 @@
 import { useRef, useEffect, useMemo, useState } from 'react';
-import { SKELETON_CONNECTIONS, POSE_LANDMARKS, type SkeletonJson, type Keypoint } from '@/types';
+import { 
+  getSkeletonConnections, 
+  getMainJointIndices, 
+  type SkeletonJson, 
+  type Keypoint 
+} from '@/types';
 import { TRACK_COLORS, type TrackSlot, type PositionKeyframe } from '@/types';
 
 interface SkeletonRendererProps {
@@ -76,12 +81,13 @@ export function SkeletonRenderer({
       ctx.lineWidth = 2;
       ctx.lineCap = 'round';
 
-      SKELETON_CONNECTIONS.forEach(([startIdx, endIdx]) => {
+      const connections = getSkeletonConnections(skeletonData?.meta?.num_joints ?? 33);
+      connections.forEach(([startIdx, endIdx]) => {
         const start = keypoints[startIdx];
         const end = keypoints[endIdx];
         
-        // 둘 다 visibility가 0.5 이상일 때만 그리기
-        if (start.visibility > 0.5 && end.visibility > 0.5) {
+        // 둘 다 존재하고 visibility가 0.5 이상일 때만 그리기
+        if (start && end && start.visibility > 0.5 && end.visibility > 0.5) {
           const startPos = toCanvas(start);
           const endPos = toCanvas(end);
           
@@ -95,22 +101,13 @@ export function SkeletonRenderer({
 
     // 관절점 그리기
     if (showJoints) {
+      const mainJoints = getMainJointIndices(skeletonData?.meta?.num_joints ?? 33);
       keypoints.forEach((kp, idx) => {
-        if (kp.visibility > 0.5) {
+        if (kp && kp.visibility > 0.5) {
           const pos = toCanvas(kp);
           
           // 주요 관절은 더 크게
-          const isMainJoint = [
-            POSE_LANDMARKS.NOSE,
-            POSE_LANDMARKS.LEFT_SHOULDER,
-            POSE_LANDMARKS.RIGHT_SHOULDER,
-            POSE_LANDMARKS.LEFT_HIP,
-            POSE_LANDMARKS.RIGHT_HIP,
-            POSE_LANDMARKS.LEFT_WRIST,
-            POSE_LANDMARKS.RIGHT_WRIST,
-            POSE_LANDMARKS.LEFT_ANKLE,
-            POSE_LANDMARKS.RIGHT_ANKLE,
-          ].includes(idx as typeof POSE_LANDMARKS.NOSE);
+          const isMainJoint = mainJoints.includes(idx);
           
           const radius = isMainJoint ? 4 : 2;
           
@@ -250,11 +247,12 @@ export function FrontView({ dancers, currentTime = 0 }: FrontViewProps) {
       ctx.lineCap = 'round';
       ctx.globalAlpha = opacity * 0.9;
 
-      SKELETON_CONNECTIONS.forEach(([startIdx, endIdx]) => {
+      const connections = getSkeletonConnections(skeletonData?.meta?.num_joints ?? 33);
+      connections.forEach(([startIdx, endIdx]) => {
         const start = keypoints[startIdx];
         const end = keypoints[endIdx];
 
-        if (start.visibility > 0.5 && end.visibility > 0.5) {
+        if (start && end && start.visibility > 0.5 && end.visibility > 0.5) {
           const startPos = toCanvas(start);
           const endPos = toCanvas(end);
 
@@ -267,16 +265,11 @@ export function FrontView({ dancers, currentTime = 0 }: FrontViewProps) {
 
       // 관절점 그리기
       ctx.globalAlpha = opacity;
+      const mainJoints = getMainJointIndices(skeletonData?.meta?.num_joints ?? 33);
       keypoints.forEach((kp, idx) => {
-        if (kp.visibility > 0.5) {
+        if (kp && kp.visibility > 0.5) {
           const pos = toCanvas(kp);
-          const isMainJoint = [
-            POSE_LANDMARKS.NOSE,
-            POSE_LANDMARKS.LEFT_SHOULDER,
-            POSE_LANDMARKS.RIGHT_SHOULDER,
-            POSE_LANDMARKS.LEFT_HIP,
-            POSE_LANDMARKS.RIGHT_HIP,
-          ].includes(idx as typeof POSE_LANDMARKS.NOSE);
+          const isMainJoint = mainJoints.includes(idx);
 
           const jointRadius = (isMainJoint ? 4 : 2) * scale;
           
