@@ -40,7 +40,7 @@ export default function MusicSelectPage() {
     if (!projectName.trim()) {
       setProjectName(selectedFile.name.replace(/\.[^/.]+$/, '')); // 확장자 제거
     }
-  }, [audioUrl]);
+  }, [audioUrl, projectName]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
