@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson, Layers, Save, Loader2, Check, ChevronsUp, ChevronUp, ChevronsDown, ChevronDown, Trash2 } from 'lucide-react';
+import { ArrowLeft, Play, Pause, SkipBack, Square, Video, Layers, Save, Loader2, Check, ChevronsUp, ChevronUp, ChevronsDown, ChevronDown, Trash2 } from 'lucide-react';
 import { Button, FrontView, TopViewEditor, interpolatePosition } from '@/components';
 import { useProjectStore, useCurrentProject, useCurrentTime, useIsPlaying } from '@/stores';
 import { cn, formatTimeWithMs, formatTime } from '@/lib/utils';
@@ -496,18 +496,15 @@ function LayerBlock({
 function TrackLabel({ 
   track,
   onUploadVideo,
-  onUploadJson,
   onUploadPatch,
   hasLayers,
 }: { 
   track: Track;
   onUploadVideo: (trackId: number, file: File) => void;
-  onUploadJson: (trackId: number, file: File) => void;
   onUploadPatch: (trackId: number, file: File) => void;
   hasLayers: boolean;
 }) {
   const videoInputRef = useRef<HTMLInputElement>(null);
-  const jsonInputRef = useRef<HTMLInputElement>(null);
   const patchInputRef = useRef<HTMLInputElement>(null);
   const color = TRACK_COLORS[track.slot];
 
@@ -515,14 +512,6 @@ function TrackLabel({
     const file = e.target.files?.[0];
     if (file) {
       onUploadVideo(track.trackId, file);
-      e.target.value = '';
-    }
-  };
-
-  const handleJsonChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      onUploadJson(track.trackId, file);
       e.target.value = '';
     }
   };
@@ -563,26 +552,6 @@ function TrackLabel({
         )}
       >
         <Video className="w-3.5 h-3.5" />
-      </button>
-
-      {/* JSON 업로드 버튼 */}
-      <input
-        ref={jsonInputRef}
-        type="file"
-        accept=".json"
-        onChange={handleJsonChange}
-        className="hidden"
-      />
-      <button
-        onClick={() => jsonInputRef.current?.click()}
-        title="스켈레톤 JSON 업로드"
-        className={cn(
-          'flex items-center justify-center w-7 h-7 rounded transition-all',
-          'bg-surface-700 hover:bg-surface-600 text-surface-400 hover:text-white',
-          'border border-surface-600 hover:border-surface-500'
-        )}
-      >
-        <FileJson className="w-3.5 h-3.5" />
       </button>
 
       {/* 패치 업로드 버튼 (기존 레이어가 있을 때만 활성화) */}
@@ -728,6 +697,38 @@ export default function EditorPage() {
     trackId: number;
   } | null>(null);
   
+  // 트랙 레이블 영역 너비 (리사이즈 가능)
+  const [trackLabelWidth, setTrackLabelWidth] = useState(176); // 기본값 w-44 = 176px
+  const MIN_LABEL_WIDTH = 120;
+  const MAX_LABEL_WIDTH = 400;
+  
+  // 트랙 레이블 리사이저 드래그
+  const labelResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  
+  const handleLabelResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    labelResizeRef.current = {
+      startX: e.clientX,
+      startWidth: trackLabelWidth,
+    };
+    
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!labelResizeRef.current) return;
+      const delta = moveEvent.clientX - labelResizeRef.current.startX;
+      const newWidth = Math.min(MAX_LABEL_WIDTH, Math.max(MIN_LABEL_WIDTH, labelResizeRef.current.startWidth + delta));
+      setTrackLabelWidth(newWidth);
+    };
+    
+    const handleMouseUp = () => {
+      labelResizeRef.current = null;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [trackLabelWidth]);
+  
   // 줌 핸들러 (드래그 delta 기반)
   const handleZoom = useCallback((delta: number) => {
     setPixelsPerSecond(prev => {
@@ -829,6 +830,65 @@ export default function EditorPage() {
         
         setCurrentProject(transformedProject);
         console.log('✅ Project loaded and transformed');
+        
+        // ============================================
+        // READY 상태 레이어의 스켈레톤 JSON 자동 로드
+        // ============================================
+        const readyLayers: Array<{ layerId: number; objectKey: string }> = [];
+        
+        transformedProject.tracks.forEach(track => {
+          track.layers.forEach(layer => {
+            if (layer.skeleton.status === 'READY' && layer.skeleton.objectKey) {
+              readyLayers.push({
+                layerId: layer.layerId,
+                objectKey: layer.skeleton.objectKey,
+              });
+            }
+          });
+        });
+        
+        if (readyLayers.length > 0) {
+          console.log(`📥 Auto-loading ${readyLayers.length} skeleton JSON(s)...`);
+          
+          // 병렬로 모든 스켈레톤 JSON 로드
+          const loadPromises = readyLayers.map(async ({ layerId, objectKey }) => {
+            try {
+              const presignResult = await assetsApi.getPresignedUrl(objectKey);
+              let url = presignResult.url;
+              
+              // MinIO 호스트 치환 (Docker 내부 -> 프록시)
+              if (url.includes('minio:9000')) {
+                url = url.replace('http://minio:9000', '/minio-presign');
+              }
+              
+              const jsonResponse = await fetch(url);
+              if (!jsonResponse.ok) throw new Error(`HTTP ${jsonResponse.status}`);
+              
+              const skeletonJson = await jsonResponse.json() as SkeletonJson;
+              
+              console.log(`✅ Loaded skeleton for layer ${layerId}`);
+              return { layerId, skeletonJson };
+            } catch (err) {
+              console.warn(`⚠️ Failed to load skeleton for layer ${layerId}:`, err);
+              return null;
+            }
+          });
+          
+          const results = await Promise.all(loadPromises);
+          
+          // 성공한 결과만 캐시에 추가
+          const newCache = new Map<number, SkeletonJson>();
+          results.forEach(result => {
+            if (result) {
+              newCache.set(result.layerId, result.skeletonJson);
+            }
+          });
+          
+          if (newCache.size > 0) {
+            setSkeletonCache(newCache);
+            console.log(`💾 Cached ${newCache.size} skeleton(s) in memory`);
+          }
+        }
         
       } catch (err) {
         console.error('❌ Failed to load project:', err);
@@ -1060,19 +1120,30 @@ export default function EditorPage() {
     }
   }, [contextMenu, project, updateLayer]);
 
-  // 레이어 삭제
-  const handleDeleteLayer = useCallback(() => {
+  // 레이어 삭제 (백엔드 연동)
+  const handleDeleteLayer = useCallback(async () => {
     if (!contextMenu) return;
     
-    // 스켈레톤 캐시에서도 제거
+    const { layer, trackId } = contextMenu;
+    
+    // 1. 프론트엔드 상태에서 즉시 제거 (낙관적 업데이트)
     setSkeletonCache(prev => {
       const newCache = new Map(prev);
-      newCache.delete(contextMenu.layer.layerId);
+      newCache.delete(layer.layerId);
       return newCache;
     });
+    removeLayer(layer.layerId);
+    console.log(`🗑️ [삭제] ${layer.label}`);
     
-    removeLayer(contextMenu.layer.layerId);
-    console.log(`🗑️ [삭제] ${contextMenu.layer.label}`);
+    // 2. 백엔드에 삭제 요청
+    try {
+      await layerApi.delete(trackId, layer.layerId);
+      console.log(`✅ Layer ${layer.layerId} deleted from backend`);
+    } catch (err) {
+      console.error(`❌ Failed to delete layer ${layer.layerId} from backend:`, err);
+      // 백엔드 삭제 실패 시에도 프론트엔드에서는 이미 삭제됨
+      // 새로고침하면 다시 나타날 수 있음 (알림 표시 가능)
+    }
   }, [contextMenu, removeLayer]);
 
   // 레이어 상태 폴링 (PROCESSING → READY 대기)
@@ -1282,98 +1353,6 @@ export default function EditorPage() {
       alert(`영상 업로드 실패:\n${errorMessage}`);
     }
   }, [project, addLayer, updateLayer, addToSkeletonCache, pollLayerStatus]);
-
-  // JSON 업로드 핸들러
-  const handleUploadJson = useCallback(async (trackId: number, file: File) => {
-    console.log(`Uploading skeleton JSON for Track ${trackId}:`, file.name);
-    
-    try {
-      // 1. 먼저 JSON 파일을 파싱하여 메타데이터 추출
-      const rawText = await file.text();
-      const json = JSON.parse(rawText);
-      
-      if (!json.meta && !json.frames) {
-        throw new Error('Invalid skeleton JSON: missing meta or frames');
-      }
-      
-      const meta = json.meta || {};
-      const frames = json.frames || [];
-      const fps = meta.fps || 24;
-      const numFrames = frames.length || meta.num_frames_sampled || 0;
-      const duration = numFrames / fps;
-      
-      if (numFrames === 0) {
-        throw new Error('No frames found in skeleton JSON');
-      }
-      
-      console.log(`📊 Parsed: ${numFrames} frames, ${duration.toFixed(1)}s, ${fps}fps`);
-      
-      // 2. 트랙 정보 가져오기
-      const track = project?.tracks.find(t => t.trackId === trackId);
-      const lastEndTime = track?.layers.reduce((max, layer) => 
-        Math.max(max, layer.endSec), 0
-      ) ?? 0;
-      const maxPriority = track?.layers.reduce((max, layer) => 
-        Math.max(max, layer.priority), 0
-      ) ?? 0;
-      
-      // 3. 백엔드에 레이어 업로드
-      console.log('⬆️ Uploading to backend...');
-      const response = await layerApi.upload(
-        trackId,
-        file,
-        lastEndTime,
-        lastEndTime + duration,
-        maxPriority + 1,
-        file.name.replace(/\.[^/.]+$/, '')
-      );
-      console.log('✅ Layer created:', response);
-      
-      // 4. 시간 정보 계산 (백엔드가 upload 시 시간을 무시할 수 있음)
-      const startSec = lastEndTime;
-      const endSec = lastEndTime + duration;
-      
-      // 백엔드에 시간 업데이트
-      if (Number(response.start_sec) !== startSec || Number(response.end_sec) !== endSec) {
-        console.log('⏱️ Updating layer time...', { startSec, endSec });
-        await layerApi.update(trackId, response.id, {
-          start_sec: startSec,
-          end_sec: endSec,
-        });
-      }
-      
-      // 5. 스토어에 레이어 추가 (계산된 시간 사용, 즉시 READY 상태)
-      addLayer(trackId, {
-        layerId: response.id,
-        trackId: response.track_id,
-        startSec: startSec,
-        endSec: endSec,
-        priority: response.priority,
-        label: response.label,
-        fadeInSec: 0,
-        fadeOutSec: 0,
-        skeleton: {
-          sourceId: response.skeleton_source_id,
-          status: 'READY',  // JSON 직접 업로드는 즉시 READY
-          objectKey: response.source_object_key,
-          fps: fps,
-          numFrames: numFrames,
-          numJoints: meta.num_joints || 33,
-          poseModel: meta.pose_model || null,
-        },
-      });
-      
-      // 6. 스켈레톤 데이터를 캐시에 저장 (즉시 렌더링용)
-      addToSkeletonCache(response.id, json as SkeletonJson);
-      
-      console.log(`✅ Layer uploaded: ID=${response.id}, ${numFrames} frames, status=READY`);
-      
-    } catch (err) {
-      console.error('❌ Failed to upload skeleton JSON:', err);
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      alert(`스켈레톤 JSON 업로드 실패:\n\n${errorMessage}`);
-    }
-  }, [project, addLayer, addToSkeletonCache]);
 
   // 패치 JSON 업로드 핸들러 (높은 priority로 추가, 현재 시간 위치에 배치)
   const handleUploadPatch = useCallback(async (trackId: number, file: File) => {
@@ -1887,8 +1866,11 @@ export default function EditorPage() {
 
           {/* 타임라인 */}
           <div className="flex max-h-72">
-            {/* 왼쪽: 트랙 레이블 (고정) */}
-            <div className="w-44 flex-shrink-0 overflow-y-auto">
+            {/* 왼쪽: 트랙 레이블 (리사이즈 가능) */}
+            <div 
+              className="flex-shrink-0 overflow-y-auto relative"
+              style={{ width: trackLabelWidth }}
+            >
               <RulerLabel />
               <MusicTrackLabel />
               {project.tracks.map((track) => (
@@ -1896,11 +1878,17 @@ export default function EditorPage() {
                   key={track.trackId}
                   track={track}
                   onUploadVideo={handleUploadVideo}
-                  onUploadJson={handleUploadJson}
                   onUploadPatch={handleUploadPatch}
                   hasLayers={track.layers.length > 0}
                 />
               ))}
+              
+              {/* 리사이저 핸들 */}
+              <div
+                className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-accent-500/50 active:bg-accent-500 transition-colors z-10"
+                onMouseDown={handleLabelResizeStart}
+                title="드래그하여 너비 조절"
+              />
             </div>
             
             {/* 오른쪽: 타임라인 내용 (스크롤 가능) */}
