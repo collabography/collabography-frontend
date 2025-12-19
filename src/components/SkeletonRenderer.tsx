@@ -314,16 +314,19 @@ function lerp(a: number, b: number, t: number): number {
 }
 
 /**
- * 새로운 보간 로직:
- * - STEP: 해당 위치(x, y)에서 멈춤
- * - LINEAR: 이전 STEP에서 다음 STEP으로 이동 중 (x, y 없음)
+ * 위치 보간 로직:
+ * - 각 STEP 키프레임 0.5초 전부터 이전 위치에서 해당 위치로 선형 이동
+ * - 그 외 시간에는 현재 위치에서 머무름
  * 
- * 예시:
- *   [STEP 0초 (0.2, 0.7)] → [LINEAR 1초] → [STEP 2초 (0.5, 0.5)]
- *   - 0~1초: (0.2, 0.7)에서 머무름
- *   - 1~2초: (0.2, 0.7) → (0.5, 0.5) 선형 이동
- *   - 2초~: (0.5, 0.5)에서 머무름
+ * 예시: (시간1=0초, 포지션1), (시간2=2초, 포지션2), (시간3=5초, 포지션3)
+ *   - 0~1.5초: 포지션1에서 머무름
+ *   - 1.5~2초: 포지션1 → 포지션2로 이동 (0.5초간)
+ *   - 2~4.5초: 포지션2에서 머무름
+ *   - 4.5~5초: 포지션2 → 포지션3으로 이동 (0.5초간)
+ *   - 5초~: 포지션3에서 머무름
  */
+const TRANSITION_DURATION = 0.5; // 이동에 걸리는 시간 (초)
+
 function interpolatePosition(
   keyframes: PositionKeyframe[],
   currentTime: number
@@ -341,9 +344,16 @@ function interpolatePosition(
   
   if (stepKeyframes.length === 0) return null;
   
-  // 첫 STEP 이전
-  if (currentTime <= stepKeyframes[0].timeSec) {
+  // 키프레임이 1개면 항상 그 위치
+  if (stepKeyframes.length === 1) {
     return { x: stepKeyframes[0].x, y: stepKeyframes[0].y };
+  }
+  
+  // 첫 STEP 이전 (첫 키프레임으로 이동 중인지 확인)
+  const firstStep = stepKeyframes[0];
+  if (currentTime < firstStep.timeSec) {
+    // 첫 키프레임 0.5초 전부터 이동 시작 (시작 위치가 없으므로 그냥 첫 위치)
+    return { x: firstStep.x, y: firstStep.y };
   }
   
   // 마지막 STEP 이후
@@ -352,31 +362,27 @@ function interpolatePosition(
     return { x: last.x, y: last.y };
   }
   
-  // 현재 시간이 어느 STEP 사이에 있는지 찾기
+  // 현재 시간에 해당하는 구간 찾기
   for (let i = 0; i < stepKeyframes.length - 1; i++) {
     const currStep = stepKeyframes[i];
     const nextStep = stepKeyframes[i + 1];
     
+    // 다음 키프레임으로의 이동 시작 시간
+    const transitionStart = nextStep.timeSec - TRANSITION_DURATION;
+    
     if (currentTime >= currStep.timeSec && currentTime < nextStep.timeSec) {
-      // 이 구간에 LINEAR 키프레임이 있는지 확인
-      const linearInBetween = sorted.find(
-        kf => kf.interp === 'LINEAR' && 
-              kf.timeSec > currStep.timeSec && 
-              kf.timeSec <= nextStep.timeSec
-      );
-      
-      if (linearInBetween && currentTime >= linearInBetween.timeSec) {
-        // LINEAR 구간: 이동 중
-        const moveDuration = nextStep.timeSec - linearInBetween.timeSec;
-        const moveElapsed = currentTime - linearInBetween.timeSec;
-        const t = moveDuration > 0 ? moveElapsed / moveDuration : 0;
+      // 이동 구간인지 확인 (다음 키프레임 0.5초 전부터)
+      if (currentTime >= transitionStart) {
+        // 이동 중: currStep → nextStep
+        const moveElapsed = currentTime - transitionStart;
+        const t = Math.min(1, moveElapsed / TRANSITION_DURATION);
         
         return {
-          x: lerp(currStep.x, nextStep.x, Math.min(1, t)),
-          y: lerp(currStep.y, nextStep.y, Math.min(1, t)),
+          x: lerp(currStep.x, nextStep.x, t),
+          y: lerp(currStep.y, nextStep.y, t),
         };
       } else {
-        // STEP 구간: 현재 위치에서 머무름
+        // 머무름 구간: 현재 위치 유지
         return { x: currStep.x, y: currStep.y };
       }
     }

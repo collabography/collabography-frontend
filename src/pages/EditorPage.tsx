@@ -713,21 +713,8 @@ export default function EditorPage() {
   const [topViewMode, setTopViewMode] = useState<'play' | 'edit'>('play');
   
   // 스켈레톤 데이터 캐시 (layerId → SkeletonJson)
-  // localStorage에서 초기화 (새로고침해도 유지)
-  const [skeletonCache, setSkeletonCache] = useState<Map<number, SkeletonJson>>(() => {
-    if (!projectId) return new Map();
-    try {
-      const cached = localStorage.getItem(`skeleton-cache-${projectId}`);
-      if (cached) {
-        const parsed = JSON.parse(cached) as [number, SkeletonJson][];
-        console.log(`📦 Restored ${parsed.length} skeletons from localStorage`);
-        return new Map(parsed);
-      }
-    } catch (e) {
-      console.warn('Failed to restore skeleton cache:', e);
-    }
-    return new Map();
-  });
+  // 메모리에만 저장 (localStorage 용량 초과 방지)
+  const [skeletonCache, setSkeletonCache] = useState<Map<number, SkeletonJson>>(new Map());
   
   // 저장 상태 ('idle' | 'saving' | 'saved' | 'error')
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -749,23 +736,11 @@ export default function EditorPage() {
     });
   }, []);
   
-  // 스켈레톤 캐시에 추가 (localStorage에도 저장)
+  // 스켈레톤 캐시에 추가 (메모리에만 저장)
   const addToSkeletonCache = useCallback((layerId: number, data: SkeletonJson) => {
-    setSkeletonCache(prev => {
-      const newCache = new Map(prev).set(layerId, data);
-      // localStorage에 저장
-      try {
-        localStorage.setItem(
-          `skeleton-cache-${projectId}`,
-          JSON.stringify(Array.from(newCache.entries()))
-        );
-        console.log(`💾 Saved ${newCache.size} skeletons to localStorage`);
-      } catch (e) {
-        console.warn('Failed to save skeleton cache:', e);
-      }
-      return newCache;
-    });
-  }, [projectId]);
+    setSkeletonCache(prev => new Map(prev).set(layerId, data));
+    console.log(`💾 Cached skeleton for layer ${layerId} (in memory)`);
+  }, []);
 
   // 프로젝트 로드 상태
   const [isLoadingProject, setIsLoadingProject] = useState(false);
@@ -851,29 +826,6 @@ export default function EditorPage() {
             });
           }
         });
-        
-        // localStorage에서 스켈레톤 캐시 확인하고 레이어 상태 업데이트
-        const cachedSkeletons = localStorage.getItem(`skeleton-cache-${numericId}`);
-        if (cachedSkeletons) {
-          const parsed = JSON.parse(cachedSkeletons) as [number, SkeletonJson][];
-          const cachedLayerIds = new Set(parsed.map(([id]) => id));
-          console.log(`📦 Found ${parsed.length} cached skeletons in localStorage`);
-          
-          // 캐시에 있는 레이어는 상태를 READY로 변경
-          transformedProject.tracks.forEach(track => {
-            track.layers.forEach(layer => {
-              if (cachedLayerIds.has(layer.layerId)) {
-                layer.skeleton.status = 'READY';
-              }
-            });
-          });
-        } else {
-          // 캐시가 없으면 스켈레톤 상태를 PROCESSING으로 표시 (모래시계)
-          const layersWithoutCache = transformedProject.tracks.flatMap(t => t.layers);
-          if (layersWithoutCache.length > 0) {
-            console.log(`⚠️ No cached skeletons found. ${layersWithoutCache.length} layers need JSON upload.`);
-          }
-        }
         
         setCurrentProject(transformedProject);
         console.log('✅ Project loaded and transformed');
