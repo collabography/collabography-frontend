@@ -228,7 +228,9 @@ export function FrontView({ dancers, currentTime = 0 }: FrontViewProps) {
       // 좌표 변환 (스켈레톤 크기 조정 + 위치)
       const toCanvas = (kp: Keypoint) => {
         // 스켈레톤 중심을 0.5로 가정
-        const relativeX = (kp.x - 0.5) * skeletonWidth;
+        // 가로 스케일 1.5배 적용 (JSON에서 가로가 줄어들어 있어서 보정)
+        const horizontalScale = 2.0;
+        const relativeX = (kp.x - 0.5) * skeletonWidth * horizontalScale;
         const relativeY = kp.y * rect.height * 0.75 * scale;
         
         return {

@@ -1123,65 +1123,213 @@ export default function EditorPage() {
     console.log(`🗑️ [삭제] ${contextMenu.layer.label}`);
   }, [contextMenu, removeLayer]);
 
-  // 동영상 업로드 핸들러
-  const handleUploadVideo = useCallback((trackId: number, file: File) => {
-    console.log(`Uploading video for Track ${trackId}:`, file.name);
+  // 레이어 상태 폴링 (PROCESSING → READY 대기)
+  const pollLayerStatus = useCallback(async (
+    trackId: number,
+    layerId: number,
+    onReady: (layer: { source_object_key: string; source_fps: number; source_num_frames: number; source_num_joints: number }) => void,
+    onFailed: (error: string) => void,
+    maxAttempts = 60,  // 최대 60회 (5분)
+    intervalMs = 5000  // 5초 간격
+  ) => {
+    console.log(`🔄 Starting polling for layer ${layerId}...`);
     
-    const videoUrl = URL.createObjectURL(file);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const layer = await layerApi.get(trackId, layerId);
+        console.log(`📊 Poll attempt ${attempt}: status=${layer.source_status}`);
+        
+        if (layer.source_status === 'READY' && layer.source_object_key) {
+          console.log(`✅ Layer ${layerId} is READY!`);
+          onReady({
+            source_object_key: layer.source_object_key,
+            source_fps: layer.source_fps ?? 24,
+            source_num_frames: layer.source_num_frames ?? 0,
+            source_num_joints: layer.source_num_joints ?? 17,
+          });
+          return;
+        }
+        
+        if (layer.source_status === 'FAILED') {
+          console.error(`❌ Layer ${layerId} extraction FAILED:`, layer.source_error_message);
+          onFailed(layer.source_error_message || 'Skeleton extraction failed');
+          return;
+        }
+        
+        // 계속 PROCESSING이면 대기
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+        
+      } catch (err) {
+        console.warn(`⚠️ Poll attempt ${attempt} failed:`, err);
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+      }
+    }
     
-    const video = document.createElement('video');
-    video.preload = 'metadata';
+    // 타임아웃
+    console.error(`⏰ Polling timeout for layer ${layerId}`);
+    onFailed('Skeleton extraction timed out');
+  }, []);
+
+  // 동영상 업로드 핸들러 (백엔드 연동)
+  const handleUploadVideo = useCallback(async (trackId: number, file: File) => {
+    console.log(`🎬 Uploading video for Track ${trackId}:`, file.name);
     
-    video.onloadedmetadata = () => {
-      const duration = video.duration;
-      console.log(`Video duration: ${duration}s`);
+    try {
+      // 1. 비디오 메타데이터 추출
+      const videoUrl = URL.createObjectURL(file);
+      const video = document.createElement('video');
+      video.preload = 'metadata';
       
+      const duration = await new Promise<number>((resolve, reject) => {
+        video.onloadedmetadata = () => {
+          resolve(video.duration);
+          URL.revokeObjectURL(video.src);
+        };
+        video.onerror = () => {
+          URL.revokeObjectURL(videoUrl);
+          reject(new Error('Failed to load video metadata'));
+        };
+        video.src = videoUrl;
+      });
+      
+      console.log(`📊 Video duration: ${duration}s`);
+      
+      // 2. 트랙 정보 가져오기
       const track = project?.tracks.find(t => t.trackId === trackId);
       const lastEndTime = track?.layers.reduce((max, layer) => 
         Math.max(max, layer.endSec), 0
       ) ?? 0;
-      
-      // 새 레이어의 priority 계산 (가장 높은 값 + 1)
       const maxPriority = track?.layers.reduce((max, layer) => 
         Math.max(max, layer.priority), 0
       ) ?? 0;
       
-      // TODO: 백엔드 연동 시 API 호출로 대체
-      // 1. layerApi.initUpload() - presigned URL 발급
-      // 2. uploadToMinIO() - MinIO에 업로드
-      // 3. layerApi.create() - 레이어 생성
-      
-      // 임시: 로컬에서 레이어 추가
-      addLayer(trackId, {
-        layerId: Date.now(),
+      // 3. 백엔드에 영상 업로드
+      console.log('⬆️ Uploading video to backend...');
+      const response = await layerApi.upload(
         trackId,
-        startSec: lastEndTime,
-        endSec: lastEndTime + duration,
-        priority: maxPriority + 1,
-        label: file.name.replace(/\.[^/.]+$/, ''),
+        file,
+        lastEndTime,
+        lastEndTime + duration,
+        maxPriority + 1,
+        file.name.replace(/\.[^/.]+$/, '')
+      );
+      console.log('✅ Video uploaded, layer created:', response);
+      
+      // 4. 시간 정보 업데이트 (백엔드가 시간을 무시하는 경우 대비)
+      const startSec = lastEndTime;
+      const endSec = lastEndTime + duration;
+      if (Number(response.start_sec) !== startSec || Number(response.end_sec) !== endSec) {
+        console.log('⏱️ Updating layer time...', { startSec, endSec });
+        await layerApi.update(trackId, response.id, {
+          start_sec: startSec,
+          end_sec: endSec,
+        });
+      }
+      
+      // 5. 스토어에 레이어 추가 (PROCESSING 상태)
+      addLayer(trackId, {
+        layerId: response.id,
+        trackId: response.track_id,
+        startSec: startSec,
+        endSec: endSec,
+        priority: response.priority,
+        label: response.label,
         fadeInSec: 0,
         fadeOutSec: 0,
         skeleton: {
-          sourceId: Date.now(),
-          status: 'PROCESSING',
+          sourceId: response.skeleton_source_id,
+          status: 'PROCESSING',  // 아직 추출 중
           objectKey: null,
           fps: 24,
           numFrames: Math.floor(duration * 24),
-          numJoints: 33,
-          poseModel: 'mediapipe_pose',
+          numJoints: 17,
+          poseModel: null,
         },
       });
       
-      URL.revokeObjectURL(video.src);
-    };
-    
-    video.onerror = () => {
-      console.error('Failed to load video metadata');
-      URL.revokeObjectURL(videoUrl);
-    };
-    
-    video.src = videoUrl;
-  }, [project, addLayer]);
+      console.log(`🔄 Layer ${response.id} added, starting polling...`);
+      
+      // 6. 폴링 시작 (백그라운드에서)
+      pollLayerStatus(
+        trackId,
+        response.id,
+        // onReady: JSON 다운로드 및 캐시 저장
+        async (layerInfo) => {
+          try {
+            console.log(`📥 Downloading skeleton JSON: ${layerInfo.source_object_key}`);
+            
+            // presigned URL 요청
+            const presignResult = await assetsApi.getPresignedUrl(layerInfo.source_object_key);
+            let url = presignResult.url;
+            
+            // MinIO 호스트 치환 (Docker 내부 -> 프록시)
+            if (url.includes('minio:9000')) {
+              url = url.replace('http://minio:9000', '/minio-presign');
+            }
+            
+            // JSON 다운로드
+            const jsonResponse = await fetch(url);
+            if (!jsonResponse.ok) throw new Error(`HTTP ${jsonResponse.status}`);
+            
+            const skeletonJson = await jsonResponse.json() as SkeletonJson;
+            
+            // 스켈레톤 캐시에 저장
+            addToSkeletonCache(response.id, skeletonJson);
+            
+            // 레이어 상태 업데이트 (READY)
+            updateLayer(response.id, {
+              skeleton: {
+                sourceId: response.skeleton_source_id,
+                status: 'READY',
+                objectKey: layerInfo.source_object_key,
+                fps: layerInfo.source_fps,
+                numFrames: layerInfo.source_num_frames,
+                numJoints: layerInfo.source_num_joints,
+                poseModel: null,
+              },
+            });
+            
+            console.log(`✅ Layer ${response.id} skeleton loaded and ready!`);
+            
+          } catch (err) {
+            console.error(`❌ Failed to download skeleton JSON:`, err);
+            updateLayer(response.id, {
+              skeleton: {
+                sourceId: response.skeleton_source_id,
+                status: 'FAILED',
+                objectKey: null,
+                fps: 24,
+                numFrames: 0,
+                numJoints: 17,
+                poseModel: null,
+              },
+            });
+          }
+        },
+        // onFailed: 상태 업데이트
+        (error) => {
+          console.error(`❌ Skeleton extraction failed:`, error);
+          updateLayer(response.id, {
+            skeleton: {
+              sourceId: response.skeleton_source_id,
+              status: 'FAILED',
+              objectKey: null,
+              fps: 24,
+              numFrames: 0,
+              numJoints: 17,
+              poseModel: null,
+            },
+          });
+          alert(`스켈레톤 추출 실패:\n${error}`);
+        }
+      );
+      
+    } catch (err) {
+      console.error('❌ Failed to upload video:', err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      alert(`영상 업로드 실패:\n${errorMessage}`);
+    }
+  }, [project, addLayer, updateLayer, addToSkeletonCache, pollLayerStatus]);
 
   // JSON 업로드 핸들러
   const handleUploadJson = useCallback(async (trackId: number, file: File) => {
@@ -1692,10 +1840,10 @@ export default function EditorPage() {
       {/* 메인 영역 */}
       <div className="flex-1 flex flex-col min-h-0">
         {/* 프리뷰 영역 */}
-        <div className="flex-1 min-h-0 p-4 flex gap-4">
-          <div className="flex-1 min-w-0">
+        <div className="flex-shrink-0 p-4 flex gap-4 justify-center">
+          <div className="flex-shrink-0" style={{ width: 800, height: 600 }}>
             {/* Top View - 무대 배치도 (재생/편집 모드) */}
-            <div className="h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden relative">
+            <div className="w-full h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden relative">
               <TopViewEditor
                 dancers={project.tracks.map(t => ({
                   slot: t.slot,
@@ -1710,9 +1858,9 @@ export default function EditorPage() {
               />
             </div>
           </div>
-          <div className="flex-1 min-w-0 h-full">
+          <div className="flex-shrink-0" style={{ width: 800, height: 600 }}>
             {/* Front View - 스켈레톤 렌더링 */}
-            <div className="h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden">
+            <div className="w-full h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden">
               {frontViewDancers.some(d => d.skeletonData) ? (
                 <FrontView 
                   dancers={frontViewDancers.map(d => ({
