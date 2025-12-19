@@ -1,12 +1,11 @@
 import React, { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson, Layers, Save, Loader2, Check, ChevronsUp, ChevronUp, ChevronsDown, ChevronDown, Trash2 } from 'lucide-react';
-import { Button, FrontView, TopViewEditor } from '@/components';
+import { Button, FrontView, TopViewEditor, interpolatePosition } from '@/components';
 import { useProjectStore, useCurrentProject, useCurrentTime, useIsPlaying } from '@/stores';
 import { cn, formatTimeWithMs, formatTime } from '@/lib/utils';
-// TODO: 백엔드 연동 시 활성화
-// import { layerApi, keyframeApi } from '@/lib/api';
-import { TRACK_COLORS, type TrackSlot, type Track, type Layer, type SkeletonJson } from '@/types';
+import { projectApi, layerApi, keyframeApi, assetsApi } from '@/lib/api';
+import { TRACK_COLORS, type TrackSlot, type Track, type Layer, type SkeletonJson, type Project, type AssetStatus, type InterpType } from '@/types';
 
 // ============================================
 // Layer Context Menu
@@ -741,29 +740,147 @@ export default function EditorPage() {
     setSkeletonCache(prev => new Map(prev).set(layerId, data));
   }, []);
 
-  // 프로젝트 로드
-  const getProjectById = useProjectStore(state => state.getProjectById);
+  // 프로젝트 로드 상태
+  const [isLoadingProject, setIsLoadingProject] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   
+  // 프로젝트 로드
   useEffect(() => {
     if (!projectId) return;
     
     const numericId = parseInt(projectId, 10);
     
-    if (!project || project.id !== numericId) {
-      // TODO: 백엔드 연동 시 API 호출로 대체
-      // const editState = await projectApi.getEditState(numericId);
-      // setCurrentProject(transformEditState(editState));
+    // 이미 같은 프로젝트가 로드되어 있으면 스킵
+    if (project && project.id === numericId) return;
+    
+    const loadProject = async () => {
+      setIsLoadingProject(true);
+      setLoadError(null);
       
-      // 임시: 프로젝트 데이터에서 찾기
-      const foundProject = getProjectById(numericId);
-      if (foundProject) {
-        setCurrentProject(foundProject);
-      } else {
-        // 프로젝트를 찾을 수 없으면 목록으로 이동
-        navigate('/');
+      try {
+        console.log('📦 Loading project edit-state:', numericId);
+        const editState = await projectApi.getEditState(numericId);
+        console.log('✅ Edit state loaded:', editState);
+        
+        // API 응답을 프론트엔드 Project 타입으로 변환
+        const transformedProject: Project = {
+          id: editState.project.id,
+          title: editState.project.title,
+          music: {
+            objectKey: editState.project.music_object_key,
+            durationSec: editState.project.music_duration_sec 
+              ? Number(editState.project.music_duration_sec) 
+              : 0,
+            bpm: editState.project.music_bpm 
+              ? Number(editState.project.music_bpm) 
+              : null,
+          },
+          tracks: editState.tracks.map(track => ({
+            trackId: track.id,
+            slot: track.slot as TrackSlot,
+            displayName: track.display_name,
+            layers: track.layers.map(layer => ({
+              layerId: layer.id,
+              trackId: track.id,
+              startSec: Number(layer.start_sec),
+              endSec: Number(layer.end_sec),
+              priority: layer.priority,
+              label: layer.label,
+              fadeInSec: 0,
+              fadeOutSec: 0,
+              skeleton: {
+                sourceId: layer.skeleton_source_id,
+                status: layer.source_status as AssetStatus,
+                objectKey: layer.source_object_key,
+                fps: layer.source_fps ?? 24,
+                numFrames: layer.source_num_frames ?? 0,
+                numJoints: layer.source_num_joints ?? 33,
+                poseModel: null,
+              },
+            })),
+            positionKeyframes: track.keyframes.map(kf => ({
+              id: kf.id,
+              timeSec: Number(kf.time_sec),
+              x: Number(kf.x),
+              y: Number(kf.y),
+              interp: kf.interp as InterpType,
+            })),
+          })),
+          createdAt: editState.project.created_at,
+          updatedAt: editState.project.updated_at,
+        };
+        
+        // 각 트랙에 기본 position keyframe이 없으면 추가
+        transformedProject.tracks.forEach(track => {
+          if (track.positionKeyframes.length === 0) {
+            // 기본 위치 설정 (slot 1: 왼쪽, slot 2: 중앙, slot 3: 오른쪽)
+            const defaultX = track.slot === 1 ? 0.25 : track.slot === 2 ? 0.5 : 0.75;
+            track.positionKeyframes.push({
+              id: Date.now() + track.slot,
+              timeSec: 0,
+              x: defaultX,
+              y: 0.5,
+              interp: 'STEP',
+            });
+          }
+        });
+        
+        setCurrentProject(transformedProject);
+        console.log('✅ Project loaded and transformed');
+        
+        // 각 레이어의 스켈레톤 JSON을 MinIO에서 비동기로 로드
+        const layersToLoad = transformedProject.tracks.flatMap(track =>
+          track.layers.filter(layer => 
+            layer.skeleton.objectKey && 
+            layer.skeleton.status === 'READY'
+          )
+        );
+        
+        if (layersToLoad.length > 0) {
+          console.log(`📥 Loading ${layersToLoad.length} skeleton JSON files...`);
+          
+          // 병렬로 스켈레톤 JSON 로드 (백그라운드에서)
+          Promise.all(layersToLoad.map(async (layer) => {
+            try {
+              if (!layer.skeleton.objectKey) return;
+              
+              // presigned URL 요청
+              const presignResult = await assetsApi.getPresignedUrl(layer.skeleton.objectKey);
+              let url = presignResult.url;
+              
+              // MinIO 호스트 치환 (Docker 내부 -> 프록시)
+              if (url.includes('minio:9000')) {
+                url = url.replace('http://minio:9000', '/minio-presign');
+              }
+              
+              // JSON 다운로드
+              const response = await fetch(url);
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              
+              const json = await response.json();
+              
+              // 캐시에 저장
+              useProjectStore.getState().addToSkeletonCache(layer.layerId, json);
+              console.log(`✅ Loaded skeleton for layer ${layer.layerId}`);
+              
+            } catch (err) {
+              console.warn(`⚠️ Failed to load skeleton for layer ${layer.layerId}:`, err);
+            }
+          })).then(() => {
+            console.log('📥 All skeleton loading complete');
+          });
+        }
+        
+      } catch (err) {
+        console.error('❌ Failed to load project:', err);
+        setLoadError(err instanceof Error ? err.message : '프로젝트를 불러오는데 실패했습니다.');
+      } finally {
+        setIsLoadingProject(false);
       }
-    }
-  }, [projectId, project, getProjectById, setCurrentProject, navigate]);
+    };
+    
+    loadProject();
+  }, [projectId, project, setCurrentProject]);
 
   // 타임라인 전체 길이 계산
   const timelineDuration = useMemo(() => {
@@ -778,19 +895,59 @@ export default function EditorPage() {
 
   // 오디오 ref
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  
+  // 음악 presigned URL 발급
+  useEffect(() => {
+    if (!project?.music.objectKey) {
+      setAudioUrl(null);
+      return;
+    }
+    
+    const fetchAudioUrl = async () => {
+      try {
+        console.log('🎵 Fetching presigned URL for:', project.music.objectKey);
+        const response = await assetsApi.getPresignedUrl(project.music.objectKey!);
+        
+        // Docker 내부 주소를 Vite 프록시 경로로 변환 (개발 환경용)
+        // http://minio:9000/collabography/... → /minio-presign/collabography/...
+        const fixedUrl = response.url.replace('http://minio:9000', '/minio-presign');
+        console.log('✅ Audio URL received:', fixedUrl);
+        setAudioUrl(fixedUrl);
+      } catch (err) {
+        console.error('❌ Failed to get audio presigned URL:', err);
+      }
+    };
+    
+    fetchAudioUrl();
+  }, [project?.music.objectKey]);
   
   // 오디오 element 생성
   useEffect(() => {
-    if (project?.music.objectKey) {
-      const audio = new Audio(project.music.objectKey);
+    if (audioUrl) {
+      const audio = new Audio();
+      
+      // 로드 완료 이벤트
+      audio.addEventListener('canplaythrough', () => {
+        console.log('✅ Audio ready to play');
+      });
+      
+      // 에러 이벤트
+      audio.addEventListener('error', (e) => {
+        console.error('❌ Audio load error:', audio.error?.message);
+      });
+      
+      audio.src = audioUrl;
+      audio.load();
       audioRef.current = audio;
       
       return () => {
         audio.pause();
+        audio.src = '';
         audioRef.current = null;
       };
     }
-  }, [project?.music.objectKey]);
+  }, [audioUrl]);
 
   // 재생 애니메이션
   const currentTimeRef = useRef(currentTime);
@@ -1020,167 +1177,189 @@ export default function EditorPage() {
   }, [project, addLayer]);
 
   // JSON 업로드 핸들러
-  const handleUploadJson = useCallback((trackId: number, file: File) => {
+  const handleUploadJson = useCallback(async (trackId: number, file: File) => {
     console.log(`Uploading skeleton JSON for Track ${trackId}:`, file.name);
     
-    const reader = new FileReader();
-    
-    reader.onload = (e) => {
-      try {
-        const rawText = e.target?.result as string;
-        console.log('JSON file size:', rawText.length, 'bytes');
-        console.log('JSON preview:', rawText.substring(0, 200));
-        
-        const json = JSON.parse(rawText);
-        console.log('Parsed JSON:', json);
-        
-        // 구조 검증
-        if (!json.meta && !json.frames) {
-          throw new Error('Invalid skeleton JSON: missing meta or frames');
-        }
-        
-        const meta = json.meta || {};
-        const frames = json.frames || [];
-        
-        console.log('Meta:', meta);
-        console.log('Frames count:', frames.length);
-        
-        const fps = meta.fps || 24;
-        const numFrames = frames.length || meta.num_frames_sampled || 0;
-        const duration = numFrames / fps;
-        
-        if (numFrames === 0) {
-          throw new Error('No frames found in skeleton JSON');
-        }
-        
-        const track = project?.tracks.find(t => t.trackId === trackId);
-        const lastEndTime = track?.layers.reduce((max, layer) => 
-          Math.max(max, layer.endSec), 0
-        ) ?? 0;
-        
-        const maxPriority = track?.layers.reduce((max, layer) => 
-          Math.max(max, layer.priority), 0
-        ) ?? 0;
-        
-        // TODO: 백엔드 연동 시 API 호출로 대체
-        // 1. layerApi.initUpload() - presigned URL 발급
-        // 2. uploadToMinIO() - MinIO에 JSON 업로드
-        // 3. layerApi.create() - 레이어 생성 (SKELETON_JSON 타입)
-        
-        const layerId = Date.now();
-        
-        addLayer(trackId, {
-          layerId,
-          trackId,
-          startSec: lastEndTime,
-          endSec: lastEndTime + duration,
-          priority: maxPriority + 1,
-          label: file.name.replace(/\.[^/.]+$/, ''),
-          fadeInSec: 0,
-          fadeOutSec: 0,
-          skeleton: {
-            sourceId: Date.now(),
-            status: 'READY', // JSON 직접 업로드는 바로 READY
-            objectKey: null,
-            fps,
-            numFrames,
-            numJoints: meta.num_joints || 33,
-            poseModel: meta.pose_model || 'mediapipe_pose',
-          },
-        });
-        
-        // 스켈레톤 데이터를 캐시에 저장
-        addToSkeletonCache(layerId, json as SkeletonJson);
-        
-        console.log(`✅ JSON loaded: ${numFrames} frames, ${duration.toFixed(1)}s, ${fps}fps`);
-      } catch (err) {
-        console.error('❌ Failed to parse skeleton JSON:', err);
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        alert(`스켈레톤 JSON 파일을 파싱할 수 없습니다.\n\n에러: ${errorMessage}`);
+    try {
+      // 1. 먼저 JSON 파일을 파싱하여 메타데이터 추출
+      const rawText = await file.text();
+      const json = JSON.parse(rawText);
+      
+      if (!json.meta && !json.frames) {
+        throw new Error('Invalid skeleton JSON: missing meta or frames');
       }
-    };
-    
-    reader.onerror = () => {
-      console.error('Failed to read JSON file');
-    };
-    
-    reader.readAsText(file);
+      
+      const meta = json.meta || {};
+      const frames = json.frames || [];
+      const fps = meta.fps || 24;
+      const numFrames = frames.length || meta.num_frames_sampled || 0;
+      const duration = numFrames / fps;
+      
+      if (numFrames === 0) {
+        throw new Error('No frames found in skeleton JSON');
+      }
+      
+      console.log(`📊 Parsed: ${numFrames} frames, ${duration.toFixed(1)}s, ${fps}fps`);
+      
+      // 2. 트랙 정보 가져오기
+      const track = project?.tracks.find(t => t.trackId === trackId);
+      const lastEndTime = track?.layers.reduce((max, layer) => 
+        Math.max(max, layer.endSec), 0
+      ) ?? 0;
+      const maxPriority = track?.layers.reduce((max, layer) => 
+        Math.max(max, layer.priority), 0
+      ) ?? 0;
+      
+      // 3. 백엔드에 레이어 업로드
+      console.log('⬆️ Uploading to backend...');
+      const response = await layerApi.upload(
+        trackId,
+        file,
+        lastEndTime,
+        lastEndTime + duration,
+        maxPriority + 1,
+        file.name.replace(/\.[^/.]+$/, '')
+      );
+      console.log('✅ Layer created:', response);
+      
+      // 4. 시간 정보 계산 (백엔드가 upload 시 시간을 무시할 수 있음)
+      const startSec = lastEndTime;
+      const endSec = lastEndTime + duration;
+      
+      // 백엔드에 시간 업데이트
+      if (Number(response.start_sec) !== startSec || Number(response.end_sec) !== endSec) {
+        console.log('⏱️ Updating layer time...', { startSec, endSec });
+        await layerApi.update(trackId, response.id, {
+          start_sec: startSec,
+          end_sec: endSec,
+        });
+      }
+      
+      // 5. 스토어에 레이어 추가 (계산된 시간 사용, 즉시 READY 상태)
+      addLayer(trackId, {
+        layerId: response.id,
+        trackId: response.track_id,
+        startSec: startSec,
+        endSec: endSec,
+        priority: response.priority,
+        label: response.label,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        skeleton: {
+          sourceId: response.skeleton_source_id,
+          status: 'READY',  // JSON 직접 업로드는 즉시 READY
+          objectKey: response.source_object_key,
+          fps: fps,
+          numFrames: numFrames,
+          numJoints: meta.num_joints || 33,
+          poseModel: meta.pose_model || null,
+        },
+      });
+      
+      // 6. 스켈레톤 데이터를 캐시에 저장 (즉시 렌더링용)
+      addToSkeletonCache(response.id, json as SkeletonJson);
+      
+      console.log(`✅ Layer uploaded: ID=${response.id}, ${numFrames} frames, status=READY`);
+      
+    } catch (err) {
+      console.error('❌ Failed to upload skeleton JSON:', err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      alert(`스켈레톤 JSON 업로드 실패:\n\n${errorMessage}`);
+    }
   }, [project, addLayer, addToSkeletonCache]);
 
   // 패치 JSON 업로드 핸들러 (높은 priority로 추가, 현재 시간 위치에 배치)
-  const handleUploadPatch = useCallback((trackId: number, file: File) => {
+  const handleUploadPatch = useCallback(async (trackId: number, file: File) => {
     console.log(`📌 Uploading PATCH for Track ${trackId}:`, file.name);
     
-    const reader = new FileReader();
-    
-    reader.onload = (e) => {
-      try {
-        const rawText = e.target?.result as string;
-        const json = JSON.parse(rawText);
-        
-        if (!json.meta && !json.frames) {
-          throw new Error('Invalid skeleton JSON: missing meta or frames');
-        }
-        
-        const meta = json.meta || {};
-        const frames = json.frames || [];
-        const fps = meta.fps || 24;
-        const numFrames = frames.length || meta.num_frames_sampled || 0;
-        const duration = numFrames / fps;
-        
-        if (numFrames === 0) {
-          throw new Error('No frames found in skeleton JSON');
-        }
-        
-        // 패치는 현재 재생 시간 위치에 배치 (프레임 스냅 적용)
-        const snappedStartTime = snapToFrame(currentTime);
-        
-        const layerId = Date.now();
-        
-        // store에서 최신 상태를 직접 가져와서 최대 priority 계산
-        // (closure로 인해 project가 stale할 수 있으므로)
-        const currentState = useProjectStore.getState();
-        const latestProject = currentState.currentProject;
-        const track = latestProject?.tracks.find(t => t.trackId === trackId);
-        const maxPriority = track?.layers.reduce((max, layer) => 
-          Math.max(max, layer.priority), PATCH_PRIORITY_THRESHOLD
-        ) ?? PATCH_PRIORITY_THRESHOLD;
-        
-        console.log(`📊 Current max priority in track: ${maxPriority}, new patch will be: ${maxPriority + 1}`);
-        
-        // 패치는 항상 기존보다 높은 priority로 설정
-        addLayer(trackId, {
-          layerId,
-          trackId,
-          startSec: snappedStartTime,
-          endSec: snappedStartTime + duration,
-          priority: maxPriority + 1, // 항상 기존 최대 + 1
-          label: `${file.name.replace(/\.[^/.]+$/, '')}`,
-          fadeInSec: 0,
-          fadeOutSec: 0,
-          skeleton: {
-            sourceId: Date.now(),
-            status: 'READY',
-            objectKey: null,
-            fps,
-            numFrames,
-            numJoints: meta.num_joints || 33,
-            poseModel: meta.pose_model || 'mediapipe_pose',
-          },
-        });
-        
-        addToSkeletonCache(layerId, json as SkeletonJson);
-        
-        console.log(`✅ PATCH loaded at ${snappedStartTime.toFixed(2)}s: ${numFrames} frames (${duration.toFixed(2)}s)`);
-        console.log(`   → Drag to reposition, frames will snap to grid`);
-      } catch (err) {
-        console.error('❌ Failed to parse patch JSON:', err);
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        alert(`패치 JSON 파일을 파싱할 수 없습니다.\n\n에러: ${errorMessage}`);
+    try {
+      // 1. JSON 파일 파싱
+      const rawText = await file.text();
+      const json = JSON.parse(rawText);
+      
+      if (!json.meta && !json.frames) {
+        throw new Error('Invalid skeleton JSON: missing meta or frames');
       }
-    };
-    
-    reader.readAsText(file);
+      
+      const meta = json.meta || {};
+      const frames = json.frames || [];
+      const fps = meta.fps || 24;
+      const numFrames = frames.length || meta.num_frames_sampled || 0;
+      const duration = numFrames / fps;
+      
+      if (numFrames === 0) {
+        throw new Error('No frames found in skeleton JSON');
+      }
+      
+      // 패치는 현재 재생 시간 위치에 배치 (프레임 스냅 적용)
+      const snappedStartTime = snapToFrame(currentTime);
+      
+      // store에서 최신 상태를 직접 가져와서 최대 priority 계산
+      const currentState = useProjectStore.getState();
+      const latestProject = currentState.currentProject;
+      const track = latestProject?.tracks.find(t => t.trackId === trackId);
+      const maxPriority = track?.layers.reduce((max, layer) => 
+        Math.max(max, layer.priority), PATCH_PRIORITY_THRESHOLD
+      ) ?? PATCH_PRIORITY_THRESHOLD;
+      
+      console.log(`📊 Current max priority: ${maxPriority}, new patch: ${maxPriority + 1}`);
+      
+      // 2. 백엔드에 레이어 업로드
+      console.log('⬆️ Uploading patch to backend...');
+      const response = await layerApi.upload(
+        trackId,
+        file,
+        snappedStartTime,
+        snappedStartTime + duration,
+        maxPriority + 1,
+        file.name.replace(/\.[^/.]+$/, '')
+      );
+      console.log('✅ Patch layer created:', response);
+      
+      // 3. 시간 정보 계산 (백엔드가 upload 시 시간을 무시할 수 있음)
+      const startSec = snappedStartTime;
+      const endSec = snappedStartTime + duration;
+      
+      // 백엔드에 시간 업데이트
+      if (Number(response.start_sec) !== startSec || Number(response.end_sec) !== endSec) {
+        console.log('⏱️ Updating patch time...', { startSec, endSec });
+        await layerApi.update(trackId, response.id, {
+          start_sec: startSec,
+          end_sec: endSec,
+        });
+      }
+      
+      // 4. 스토어에 레이어 추가 (계산된 시간 사용, 즉시 READY 상태)
+      addLayer(trackId, {
+        layerId: response.id,
+        trackId: response.track_id,
+        startSec: startSec,
+        endSec: endSec,
+        priority: response.priority,
+        label: response.label,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        skeleton: {
+          sourceId: response.skeleton_source_id,
+          status: 'READY',  // JSON 직접 업로드는 즉시 READY
+          objectKey: response.source_object_key,
+          fps: fps,
+          numFrames: numFrames,
+          numJoints: meta.num_joints || 33,
+          poseModel: meta.pose_model || null,
+        },
+      });
+      
+      // 5. 캐시에 스켈레톤 데이터 저장
+      addToSkeletonCache(response.id, json as SkeletonJson);
+      
+      console.log(`✅ PATCH uploaded at ${snappedStartTime.toFixed(2)}s: ${numFrames} frames, status=READY`);
+      
+    } catch (err) {
+      console.error('❌ Failed to upload patch:', err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      alert(`패치 업로드 실패:\n\n${errorMessage}`);
+    }
   }, [currentTime, addLayer, addToSkeletonCache]);
 
   // 레이어 드래그 이동 핸들러
@@ -1210,7 +1389,7 @@ export default function EditorPage() {
     console.log(`🔄 Layer ${layerId} moved to ${newStartSec.toFixed(2)}s - ${newEndSec.toFixed(2)}s`);
   }, [project, updateLayer]);
 
-  // 각 트랙에서 현재 시간에 활성화된 레이어의 스켈레톤 데이터
+  // 각 트랙에서 현재 시간에 활성화된 레이어의 스켈레톤 데이터 + Top View 위치
   const frontViewDancers = useMemo(() => {
     if (!project) return [];
     
@@ -1238,6 +1417,9 @@ export default function EditorPage() {
       // 레이어 시작 시간 기준으로 로컬 시간 계산
       const localTime = activeLayer ? currentTime - activeLayer.startSec : 0;
       
+      // Top View 위치 계산 (interpolatePosition 사용)
+      const topViewPosition = interpolatePosition(track.positionKeyframes, currentTime);
+      
       // 디버깅용 로그
       if (readyLayers.length > 1) {
         console.log(`[Track ${track.slot}] Active layers:`, 
@@ -1250,6 +1432,7 @@ export default function EditorPage() {
         slot: track.slot,
         skeletonData,
         localTime,
+        topViewPosition, // Top View 위치 추가
       };
     });
   }, [project, currentTime, skeletonCache]);
@@ -1342,46 +1525,46 @@ export default function EditorPage() {
     console.log('');
     console.log('📦 ===== END SAVE DATA =====');
     
-    // 저장 성공 시뮬레이션
-    setSaveStatus('saved');
-    
-    // 2초 후 idle 상태로 복귀
-    setTimeout(() => {
-      setSaveStatus('idle');
-    }, 2000);
-    
-    /* ============================================
-     * [TODO] 백엔드 연동 시 아래 코드 활성화
-     * ============================================
     try {
-      // 1. 모든 레이어 정보 저장
+      // 1. 백엔드에 저장된 레이어만 업데이트 (임시 생성된 레이어는 스킵)
+      // 임시 레이어 ID는 Date.now()로 생성되어 매우 큰 숫자 (10억 이상)
+      const MAX_BACKEND_ID = 1000000000;
+      
       const layerPromises = project.tracks.flatMap(track =>
-        track.layers.map(layer =>
-          layerApi.update(layer.layerId, {
-            start_sec: layer.startSec,
-            end_sec: layer.endSec,
-            priority: layer.priority,
-            label: layer.label ?? undefined,
-            fade_in_sec: layer.fadeInSec,
-            fade_out_sec: layer.fadeOutSec,
-          })
-        )
+        track.layers
+          .filter(layer => layer.layerId < MAX_BACKEND_ID) // 백엔드 레이어만
+          .map(layer =>
+            layerApi.update(track.trackId, layer.layerId, {
+              start_sec: layer.startSec,
+              end_sec: layer.endSec,
+              priority: layer.priority,
+              label: layer.label ?? undefined,
+            }).catch(err => {
+              console.warn(`⚠️ Failed to update layer ${layer.layerId}:`, err.message);
+              return null; // 개별 실패는 무시
+            })
+          )
       );
       
       // 2. 모든 트랙의 Position Keyframes 저장
       const keyframePromises = project.tracks.map(track =>
         keyframeApi.update(
           track.trackId,
-          track.positionKeyframes.map(kf => ({
-            time_sec: kf.timeSec,
-            x: kf.x,
-            y: kf.y,
-            interp: kf.interp,
-          }))
-        )
+          track.positionKeyframes
+            .filter(kf => kf.x !== undefined && kf.y !== undefined)
+            .map(kf => ({
+              time_sec: kf.timeSec,
+              x: kf.x!,
+              y: kf.y!,
+              interp: kf.interp,
+            }))
+        ).catch(err => {
+          console.warn(`⚠️ Failed to update keyframes for track ${track.trackId}:`, err.message);
+          return null; // 개별 실패는 무시
+        })
       );
       
-      // 병렬로 모든 요청 실행
+      // 병렬로 모든 요청 실행 (개별 실패는 무시됨)
       await Promise.all([...layerPromises, ...keyframePromises]);
       
       setSaveStatus('saved');
@@ -1403,13 +1586,35 @@ export default function EditorPage() {
         setSaveError(null);
       }, 3000);
     }
-    */
   }, [project]);
 
-  if (!project) {
+  // 로딩 중
+  if (isLoadingProject || !project) {
     return (
       <div className="min-h-screen bg-surface-900 flex items-center justify-center">
-        <p className="text-surface-400">프로젝트를 불러오는 중...</p>
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 text-accent-500 animate-spin mx-auto mb-4" />
+          <p className="text-surface-400">프로젝트를 불러오는 중...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // 에러 발생
+  if (loadError) {
+    return (
+      <div className="min-h-screen bg-surface-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 rounded-full bg-red-900/30 flex items-center justify-center mx-auto mb-4">
+            <ArrowLeft className="w-8 h-8 text-red-400" />
+          </div>
+          <h2 className="text-xl font-semibold text-surface-200 mb-2">로딩 실패</h2>
+          <p className="text-surface-400 mb-6 max-w-md">{loadError}</p>
+          <Button onClick={() => navigate('/')}>
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            프로젝트 목록으로
+          </Button>
+        </div>
       </div>
     );
   }
@@ -1507,6 +1712,7 @@ export default function EditorPage() {
                     slot: d.slot,
                     skeletonData: d.skeletonData,
                     localTime: d.localTime,
+                    topViewPosition: d.topViewPosition, // Top View 위치 전달
                   }))}
                 />
               ) : (

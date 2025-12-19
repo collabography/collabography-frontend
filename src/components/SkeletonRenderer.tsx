@@ -134,13 +134,14 @@ export function SkeletonRenderer({
   );
 }
 
-// 멀티 댄서 Front View
+// 멀티 댄서 Front View (Top View 위치 반영)
 interface FrontViewProps {
   dancers: Array<{
     slot: TrackSlot;
     skeletonData: SkeletonJson | null;
     localTime?: number; // 레이어 기준 로컬 시간 (옵션)
-    offsetX?: number; // 댄서별 X 오프셋 (-1 ~ 1)
+    offsetX?: number; // 댄서별 X 오프셋 (-1 ~ 1) - deprecated, use topViewPosition
+    topViewPosition?: { x: number; y: number } | null; // Top View에서의 위치 (0~1)
   }>;
   currentTime?: number; // 전역 시간 (localTime이 없을 때 사용)
 }
@@ -177,8 +178,16 @@ export function FrontView({ dancers, currentTime = 0 }: FrontViewProps) {
       ctx.stroke();
     }
 
+    // Top View y좌표 기준으로 정렬 (y가 작을수록 = 무대 뒤쪽 = 먼저 그림)
+    // 이렇게 하면 앞에 있는 댄서가 뒤에 있는 댄서를 가림
+    const sortedDancers = [...dancers].sort((a, b) => {
+      const aY = a.topViewPosition?.y ?? 0.5;
+      const bY = b.topViewPosition?.y ?? 0.5;
+      return aY - bY; // y가 작은 것(뒤쪽)부터 먼저 그림
+    });
+
     // 각 댄서 렌더링
-    dancers.forEach(({ slot, skeletonData, localTime, offsetX = 0 }) => {
+    sortedDancers.forEach(({ slot, skeletonData, localTime, topViewPosition }) => {
       if (!skeletonData) return;
 
       const fps = skeletonData.meta.fps;
@@ -193,26 +202,53 @@ export function FrontView({ dancers, currentTime = 0 }: FrontViewProps) {
       const keypoints = frame.keypoints;
       const color = TRACK_COLORS[slot];
 
-      // 댄서별 오프셋 적용 (화면 3등분)
-      const dancerWidth = rect.width / 3;
-      const baseX = (slot - 1) * dancerWidth + dancerWidth / 2;
+      // ============================================
+      // Top View 위치 기반 Front View 매핑
+      // ============================================
+      
+      // Top View 위치 (기본값: 중앙)
+      const tvX = topViewPosition?.x ?? 0.5; // 0=왼쪽, 1=오른쪽
+      const tvY = topViewPosition?.y ?? 0.5; // 0=무대 뒤쪽, 1=무대 앞쪽(관객 가까움)
+      
+      // Front View에서의 X 위치 (Top View x 그대로 사용)
+      // tvX: 0 → 화면 왼쪽, tvX: 1 → 화면 오른쪽
+      const frontX = tvX * rect.width;
+      
+      // Front View에서의 크기 (Top View y에 따라)
+      // tvY: 0 (뒤) → 작게 (0.5배), tvY: 1 (앞) → 크게 (1.2배)
+      const minScale = 0.5;
+      const maxScale = 1.2;
+      const scale = minScale + (maxScale - minScale) * tvY;
+      
+      // 스켈레톤 기본 너비 (화면의 30%)
+      const baseSkeletonWidth = rect.width * 0.3;
+      const skeletonWidth = baseSkeletonWidth * scale;
+      
+      // Y 오프셋 (뒤에 있을수록 위로)
+      // tvY: 0 (뒤) → 화면 위쪽, tvY: 1 (앞) → 화면 아래쪽
+      const yOffset = (1 - tvY) * rect.height * 0.15;
 
-      // 좌표 변환 (스켈레톤 크기 조정 + 위치 오프셋)
+      // 좌표 변환 (스켈레톤 크기 조정 + 위치)
       const toCanvas = (kp: Keypoint) => {
-        // 스켈레톤 중심을 0.5로 가정하고 오프셋 적용
-        const relativeX = (kp.x - 0.5) * dancerWidth * 0.8;
+        // 스켈레톤 중심을 0.5로 가정
+        const relativeX = (kp.x - 0.5) * skeletonWidth;
+        const relativeY = kp.y * rect.height * 0.75 * scale;
+        
         return {
-          x: baseX + relativeX + offsetX * dancerWidth * 0.3,
-          y: kp.y * rect.height * 0.85 + rect.height * 0.05,
+          x: frontX + relativeX,
+          y: relativeY + rect.height * 0.05 + yOffset,
           visibility: kp.visibility,
         };
       };
 
+      // 투명도 (뒤에 있을수록 약간 투명)
+      const opacity = 0.7 + 0.3 * tvY;
+
       // 본 그리기
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2 * scale;
       ctx.lineCap = 'round';
-      ctx.globalAlpha = 0.9;
+      ctx.globalAlpha = opacity * 0.9;
 
       SKELETON_CONNECTIONS.forEach(([startIdx, endIdx]) => {
         const start = keypoints[startIdx];
@@ -230,7 +266,7 @@ export function FrontView({ dancers, currentTime = 0 }: FrontViewProps) {
       });
 
       // 관절점 그리기
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = opacity;
       keypoints.forEach((kp, idx) => {
         if (kp.visibility > 0.5) {
           const pos = toCanvas(kp);
@@ -242,19 +278,25 @@ export function FrontView({ dancers, currentTime = 0 }: FrontViewProps) {
             POSE_LANDMARKS.RIGHT_HIP,
           ].includes(idx as typeof POSE_LANDMARKS.NOSE);
 
+          const jointRadius = (isMainJoint ? 4 : 2) * scale;
+          
           ctx.beginPath();
-          ctx.arc(pos.x, pos.y, isMainJoint ? 4 : 2, 0, Math.PI * 2);
+          ctx.arc(pos.x, pos.y, jointRadius, 0, Math.PI * 2);
           ctx.fillStyle = color;
           ctx.fill();
         }
       });
 
-      // 댄서 라벨
+      // 댄서 라벨 (스켈레톤 아래)
+      ctx.globalAlpha = opacity;
       ctx.fillStyle = color;
-      ctx.font = 'bold 12px sans-serif';
+      ctx.font = `bold ${Math.round(12 * scale)}px sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText(`Dancer ${slot}`, baseX, rect.height - 10);
+      const labelY = rect.height * 0.85 * scale + rect.height * 0.05 + yOffset + 15;
+      ctx.fillText(`Dancer ${slot}`, frontX, Math.min(labelY, rect.height - 5));
     });
+    
+    ctx.globalAlpha = 1;
 
   }, [dancers, currentTime]);
 

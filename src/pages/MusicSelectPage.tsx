@@ -1,13 +1,13 @@
 import { useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, Music, ArrowLeft, Play, Pause, Check } from 'lucide-react';
+import { Upload, Music, ArrowLeft, Play, Pause, Check, Loader2 } from 'lucide-react';
 import { Button, Card } from '@/components/ui';
 import { useProjectStore } from '@/stores';
+import { projectApi, musicApi } from '@/lib/api';
 import { cn, formatTime, formatFileSize } from '@/lib/utils';
 
 export default function MusicSelectPage() {
   const navigate = useNavigate();
-  const createTempProject = useProjectStore(state => state.createTempProject);
   const setCurrentProject = useProjectStore(state => state.setCurrentProject);
   
   const [file, setFile] = useState<File | null>(null);
@@ -16,6 +16,8 @@ export default function MusicSelectPage() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   
   const audioRef = useRef<HTMLAudioElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -64,24 +66,33 @@ export default function MusicSelectPage() {
     setIsPlaying(!isPlaying);
   };
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!file || !audioUrl || !projectName.trim()) return;
 
-    // TODO: 백엔드 연동 시
-    // 1. projectApi.create(projectName) - 프로젝트 생성
-    // 2. musicApi.initUpload() - presigned URL 발급
-    // 3. uploadToMinIO() - MinIO에 업로드
-    // 4. musicApi.confirmUpload() - 음악 메타 확정
-    
-    // 임시: 로컬에서 프로젝트 생성
-    const newProject = createTempProject(
-      projectName.trim(),
-      audioUrl, // 임시로 blob URL 사용
-      duration
-    );
-    
-    setCurrentProject(newProject);
-    navigate(`/project/${newProject.id}`);
+    setIsCreating(true);
+    setCreateError(null);
+
+    try {
+      // 1. 프로젝트 생성
+      console.log('📦 Creating project:', projectName.trim());
+      const projectResponse = await projectApi.create(projectName.trim());
+      const projectId = projectResponse.id;
+      console.log('✅ Project created:', projectId);
+
+      // 2. 음악 파일 업로드 (multipart/form-data)
+      console.log('🎵 Uploading music file...');
+      const uploadResponse = await musicApi.upload(projectId, file, duration);
+      console.log('✅ Music uploaded:', uploadResponse.object_key);
+
+      // 3. 에디터 페이지로 이동
+      navigate(`/project/${projectId}`);
+      
+    } catch (err) {
+      console.error('❌ Failed to create project:', err);
+      setCreateError(err instanceof Error ? err.message : '프로젝트 생성에 실패했습니다.');
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   return (
@@ -242,21 +253,38 @@ export default function MusicSelectPage() {
             )}
           </div>
 
+          {/* 에러 메시지 */}
+          {createError && (
+            <div className="p-4 rounded-lg bg-red-900/30 border border-red-700 text-red-300">
+              <p className="text-sm">{createError}</p>
+            </div>
+          )}
+
           {/* 확인 버튼 */}
           <div className="flex justify-end gap-3 pt-4">
             <Button
               variant="secondary"
               onClick={() => navigate('/')}
+              disabled={isCreating}
             >
               취소
             </Button>
             <Button
-              disabled={!file || !projectName.trim()}
+              disabled={!file || !projectName.trim() || isCreating}
               onClick={handleCreate}
               className="gap-2"
             >
-              <Check className="w-4 h-4" />
-              프로젝트 생성
+              {isCreating ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  생성 중...
+                </>
+              ) : (
+                <>
+                  <Check className="w-4 h-4" />
+                  프로젝트 생성
+                </>
+              )}
             </Button>
           </div>
         </div>

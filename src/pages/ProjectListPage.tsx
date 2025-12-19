@@ -1,12 +1,43 @@
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Music, Users, Calendar } from 'lucide-react';
+import { Plus, Music, Users, Calendar, Loader2, RefreshCw } from 'lucide-react';
 import { Button, Card, CardContent } from '@/components/ui';
-import { useProjects } from '@/stores';
+import { useProjectStore } from '@/stores';
+import { projectApi } from '@/lib/api';
 import { cn, formatTime } from '@/lib/utils';
 
 export default function ProjectListPage() {
   const navigate = useNavigate();
-  const projects = useProjects();
+  const projects = useProjectStore(state => state.projects);
+  const setProjects = useProjectStore(state => state.setProjects);
+  
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // 프로젝트 목록 로드
+  const loadProjects = async () => {
+    setIsLoading(true);
+    setError(null);
+    
+    try {
+      const response = await projectApi.list();
+      setProjects(response.items.map(item => ({
+        projectId: item.id,
+        title: item.title,
+        musicDurationSec: item.music_duration_sec ? Number(item.music_duration_sec) : null,
+        createdAt: item.created_at,
+      })));
+    } catch (err) {
+      console.error('Failed to load projects:', err);
+      setError(err instanceof Error ? err.message : '프로젝트 목록을 불러오는데 실패했습니다.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadProjects();
+  }, []);
 
   return (
     <div className="min-h-screen bg-surface-900">
@@ -40,7 +71,34 @@ export default function ProjectListPage() {
 
       {/* 메인 콘텐츠 */}
       <main className="relative max-w-6xl mx-auto px-6 py-12">
-        {projects.length === 0 ? (
+        {isLoading ? (
+          // 로딩 상태
+          <div className="flex flex-col items-center justify-center py-24">
+            <Loader2 className="w-12 h-12 text-accent-500 animate-spin mb-4" />
+            <p className="text-surface-400">프로젝트 목록을 불러오는 중...</p>
+          </div>
+        ) : error ? (
+          // 에러 상태
+          <div className="flex flex-col items-center justify-center py-24">
+            <div className="w-24 h-24 rounded-full bg-red-900/30 flex items-center justify-center mb-6">
+              <RefreshCw className="w-12 h-12 text-red-400" />
+            </div>
+            <h2 className="text-xl font-semibold text-surface-200 mb-2">
+              불러오기 실패
+            </h2>
+            <p className="text-surface-400 mb-8 text-center max-w-md">
+              {error}
+            </p>
+            <Button
+              size="lg"
+              onClick={loadProjects}
+              className="gap-2"
+            >
+              <RefreshCw className="w-5 h-5" />
+              다시 시도
+            </Button>
+          </div>
+        ) : projects.length === 0 ? (
           // 빈 상태
           <div className="flex flex-col items-center justify-center py-24">
             <div className="w-24 h-24 rounded-full bg-surface-800 flex items-center justify-center mb-6">
