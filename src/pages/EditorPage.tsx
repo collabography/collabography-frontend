@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson } from 'lucide-react';
+import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson, Layers } from 'lucide-react';
 import { Button, FrontView, TopViewEditor } from '@/components';
 import { useProjectStore, useCurrentProject, useCurrentTime, useIsPlaying } from '@/stores';
 import { cn, formatTimeWithMs, formatTime } from '@/lib/utils';
@@ -211,30 +211,108 @@ function Playhead({ currentTime, pixelsPerSecond }: { currentTime: number; pixel
   );
 }
 
-// 레이어 블록 컴포넌트
-function LayerBlock({ layer, color, pixelsPerSecond }: { layer: Layer; color: string; pixelsPerSecond: number }) {
+// 프레임 스냅 유틸리티
+const SNAP_FPS = 24;
+const snapToFrame = (timeSec: number): number => {
+  const frame = Math.round(timeSec * SNAP_FPS);
+  return frame / SNAP_FPS;
+};
+
+// 레이어 블록 컴포넌트 (드래그 가능)
+function LayerBlock({ 
+  layer, 
+  color, 
+  pixelsPerSecond,
+  onDragMove,
+  isPatch = false,
+}: { 
+  layer: Layer; 
+  color: string; 
+  pixelsPerSecond: number;
+  onDragMove?: (layerId: number, newStartSec: number) => void;
+  isPatch?: boolean;
+}) {
   const width = (layer.endSec - layer.startSec) * pixelsPerSecond;
   const left = layer.startSec * pixelsPerSecond;
   const isProcessing = layer.skeleton.status === 'PROCESSING';
   const isFailed = layer.skeleton.status === 'FAILED';
+  
+  const dragRef = useRef<{ startX: number; startLeft: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragLeft, setDragLeft] = useState(left);
+
+  // left 변경 시 dragLeft 동기화
+  useEffect(() => {
+    if (!isDragging) {
+      setDragLeft(left);
+    }
+  }, [left, isDragging]);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (!onDragMove) return;
+    e.preventDefault();
+    e.stopPropagation();
+    
+    dragRef.current = {
+      startX: e.clientX,
+      startLeft: dragLeft,
+    };
+    setIsDragging(true);
+    
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!dragRef.current) return;
+      
+      const deltaX = moveEvent.clientX - dragRef.current.startX;
+      const newLeft = Math.max(0, dragRef.current.startLeft + deltaX);
+      setDragLeft(newLeft);
+    };
+    
+    const handleMouseUp = () => {
+      if (dragRef.current && onDragMove) {
+        // 프레임 스냅 적용
+        const newStartSec = snapToFrame(dragLeft / pixelsPerSecond);
+        onDragMove(layer.layerId, newStartSec);
+      }
+      dragRef.current = null;
+      setIsDragging(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // 드래그 중일 때 스냅 프리뷰
+  const snappedLeft = isDragging 
+    ? snapToFrame(dragLeft / pixelsPerSecond) * pixelsPerSecond 
+    : left;
 
   return (
     <div
       className={cn(
         'absolute top-1 bottom-1 rounded',
-        'border flex items-center px-2 overflow-hidden cursor-pointer',
+        'border flex items-center px-2 overflow-hidden',
         'hover:brightness-110 transition-all',
         isProcessing && 'animate-pulse',
-        isFailed && 'opacity-50'
+        isFailed && 'opacity-50',
+        onDragMove ? 'cursor-grab' : 'cursor-pointer',
+        isDragging && 'cursor-grabbing opacity-80 z-30',
+        isPatch && 'border-2 border-dashed'
       )}
       style={{
-        left,
-        width: Math.max(width, 20), // 최소 너비
-        backgroundColor: `${color}30`,
-        borderColor: isFailed ? '#ef4444' : `${color}60`,
+        left: isDragging ? dragLeft : snappedLeft,
+        width: Math.max(width, 20),
+        backgroundColor: isPatch ? `${color}50` : `${color}30`,
+        borderColor: isFailed ? '#ef4444' : isPatch ? color : `${color}60`,
+        boxShadow: isPatch ? `0 0 8px ${color}40` : undefined,
       }}
-      title={`${layer.label || 'Layer'} (${(layer.endSec - layer.startSec).toFixed(1)}s) - Priority: ${layer.priority}`}
+      title={`${layer.label || 'Layer'} (${(layer.endSec - layer.startSec).toFixed(1)}s) - Priority: ${layer.priority}${isPatch ? ' [패치]' : ''}`}
+      onMouseDown={handleMouseDown}
     >
+      {isPatch && (
+        <span className="text-[10px] bg-white/20 px-1 rounded mr-1">패치</span>
+      )}
       <span 
         className="text-xs font-medium truncate"
         style={{ color: isFailed ? '#ef4444' : color }}
@@ -243,6 +321,11 @@ function LayerBlock({ layer, color, pixelsPerSecond }: { layer: Layer; color: st
         {isProcessing && ' ⏳'}
         {isFailed && ' ❌'}
       </span>
+      {isDragging && (
+        <span className="ml-auto text-[10px] text-white/70 font-mono">
+          {snapToFrame(dragLeft / pixelsPerSecond).toFixed(2)}s
+        </span>
+      )}
     </div>
   );
 }
@@ -252,13 +335,18 @@ function TrackLabel({
   track,
   onUploadVideo,
   onUploadJson,
+  onUploadPatch,
+  hasLayers,
 }: { 
   track: Track;
   onUploadVideo: (trackId: number, file: File) => void;
   onUploadJson: (trackId: number, file: File) => void;
+  onUploadPatch: (trackId: number, file: File) => void;
+  hasLayers: boolean;
 }) {
   const videoInputRef = useRef<HTMLInputElement>(null);
   const jsonInputRef = useRef<HTMLInputElement>(null);
+  const patchInputRef = useRef<HTMLInputElement>(null);
   const color = TRACK_COLORS[track.slot];
 
   const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -273,6 +361,14 @@ function TrackLabel({
     const file = e.target.files?.[0];
     if (file) {
       onUploadJson(track.trackId, file);
+      e.target.value = '';
+    }
+  };
+
+  const handlePatchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onUploadPatch(track.trackId, file);
       e.target.value = '';
     }
   };
@@ -326,30 +422,67 @@ function TrackLabel({
       >
         <FileJson className="w-3.5 h-3.5" />
       </button>
+
+      {/* 패치 업로드 버튼 (기존 레이어가 있을 때만 활성화) */}
+      <input
+        ref={patchInputRef}
+        type="file"
+        accept=".json"
+        onChange={handlePatchChange}
+        className="hidden"
+      />
+      <button
+        onClick={() => patchInputRef.current?.click()}
+        title={hasLayers ? "세그먼트 패치 업로드" : "먼저 기본 JSON을 업로드하세요"}
+        disabled={!hasLayers}
+        className={cn(
+          'flex items-center justify-center w-7 h-7 rounded transition-all',
+          hasLayers 
+            ? 'bg-amber-600/30 hover:bg-amber-600/50 text-amber-400 hover:text-amber-300 border border-amber-600/50 hover:border-amber-500'
+            : 'bg-surface-800 text-surface-600 border border-surface-700 cursor-not-allowed'
+        )}
+      >
+        <Layers className="w-3.5 h-3.5" />
+      </button>
     </div>
   );
 }
+
+// 패치 레이어 판별 (priority > 100은 패치로 간주)
+const PATCH_PRIORITY_THRESHOLD = 100;
 
 // 트랙 내용
 function TrackContent({ 
   track,
   duration,
   pixelsPerSecond,
+  onLayerDragMove,
 }: { 
   track: Track;
   duration: number;
   pixelsPerSecond: number;
+  onLayerDragMove: (layerId: number, newStartSec: number) => void;
 }) {
   const color = TRACK_COLORS[track.slot];
   const totalWidth = duration * pixelsPerSecond;
+
+  // priority 순으로 정렬 (낮은 것 먼저 렌더링, 높은 것이 위에 표시)
+  const sortedLayers = [...track.layers].sort((a, b) => a.priority - b.priority);
 
   return (
     <div 
       className="h-14 bg-surface-900/50 relative timeline-grid border-b border-surface-700"
       style={{ width: totalWidth }}
     >
-      {track.layers.map((layer) => (
-        <LayerBlock key={layer.layerId} layer={layer} color={color} pixelsPerSecond={pixelsPerSecond} />
+      {sortedLayers.map((layer) => (
+        <LayerBlock 
+          key={layer.layerId} 
+          layer={layer} 
+          color={color} 
+          pixelsPerSecond={pixelsPerSecond}
+          onDragMove={onLayerDragMove}
+          isPatch={layer.priority >= PATCH_PRIORITY_THRESHOLD}
+        />
       ))}
     </div>
   );
@@ -685,6 +818,100 @@ export default function EditorPage() {
     reader.readAsText(file);
   }, [project, addLayer, addToSkeletonCache]);
 
+  // 패치 JSON 업로드 핸들러 (높은 priority로 추가, 현재 시간 위치에 배치)
+  const handleUploadPatch = useCallback((trackId: number, file: File) => {
+    console.log(`📌 Uploading PATCH for Track ${trackId}:`, file.name);
+    
+    const reader = new FileReader();
+    
+    reader.onload = (e) => {
+      try {
+        const rawText = e.target?.result as string;
+        const json = JSON.parse(rawText);
+        
+        if (!json.meta && !json.frames) {
+          throw new Error('Invalid skeleton JSON: missing meta or frames');
+        }
+        
+        const meta = json.meta || {};
+        const frames = json.frames || [];
+        const fps = meta.fps || 24;
+        const numFrames = frames.length || meta.num_frames_sampled || 0;
+        const duration = numFrames / fps;
+        
+        if (numFrames === 0) {
+          throw new Error('No frames found in skeleton JSON');
+        }
+        
+        // 패치는 현재 재생 시간 위치에 배치 (프레임 스냅 적용)
+        const snappedStartTime = snapToFrame(currentTime);
+        
+        const layerId = Date.now();
+        
+        // 패치는 priority를 100 이상으로 설정
+        addLayer(trackId, {
+          layerId,
+          trackId,
+          startSec: snappedStartTime,
+          endSec: snappedStartTime + duration,
+          priority: PATCH_PRIORITY_THRESHOLD + 1, // 패치 우선순위
+          label: `패치: ${file.name.replace(/\.[^/.]+$/, '')}`,
+          fadeInSec: 0,
+          fadeOutSec: 0,
+          skeleton: {
+            sourceId: Date.now(),
+            status: 'READY',
+            objectKey: null,
+            fps,
+            numFrames,
+            numJoints: meta.num_joints || 33,
+            poseModel: meta.pose_model || 'mediapipe_pose',
+          },
+        });
+        
+        addToSkeletonCache(layerId, json as SkeletonJson);
+        
+        console.log(`✅ PATCH loaded at ${snappedStartTime.toFixed(2)}s: ${numFrames} frames (${duration.toFixed(2)}s)`);
+        console.log(`   → Drag to reposition, frames will snap to grid`);
+      } catch (err) {
+        console.error('❌ Failed to parse patch JSON:', err);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        alert(`패치 JSON 파일을 파싱할 수 없습니다.\n\n에러: ${errorMessage}`);
+      }
+    };
+    
+    reader.readAsText(file);
+  }, [currentTime, addLayer, addToSkeletonCache]);
+
+  // 레이어 드래그 이동 핸들러
+  const updateLayer = useProjectStore(state => state.updateLayer);
+  
+  const handleLayerDragMove = useCallback((layerId: number, newStartSec: number) => {
+    // 해당 레이어 찾기
+    if (!project) return;
+    
+    let targetLayer: Layer | null = null;
+    for (const track of project.tracks) {
+      const layer = track.layers.find(l => l.layerId === layerId);
+      if (layer) {
+        targetLayer = layer;
+        break;
+      }
+    }
+    
+    if (!targetLayer) return;
+    
+    const duration = targetLayer.endSec - targetLayer.startSec;
+    const newEndSec = newStartSec + duration;
+    
+    updateLayer(layerId, {
+      startSec: newStartSec,
+      endSec: newEndSec,
+    });
+    
+    console.log(`🔄 Layer ${layerId} moved to ${newStartSec.toFixed(2)}s - ${newEndSec.toFixed(2)}s`);
+  }, [project, updateLayer]);
+
   // 각 트랙에서 현재 시간에 활성화된 레이어의 스켈레톤 데이터
   const frontViewDancers = useMemo(() => {
     if (!project) return [];
@@ -882,6 +1109,8 @@ export default function EditorPage() {
                   track={track}
                   onUploadVideo={handleUploadVideo}
                   onUploadJson={handleUploadJson}
+                  onUploadPatch={handleUploadPatch}
+                  hasLayers={track.layers.length > 0}
                 />
               ))}
             </div>
@@ -907,6 +1136,7 @@ export default function EditorPage() {
                     track={track}
                     duration={timelineDuration}
                     pixelsPerSecond={pixelsPerSecond}
+                    onLayerDragMove={handleLayerDragMove}
                   />
                 ))}
                 
