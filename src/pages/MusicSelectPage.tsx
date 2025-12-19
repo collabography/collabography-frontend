@@ -36,7 +36,10 @@ export default function MusicSelectPage() {
     const url = URL.createObjectURL(selectedFile);
     setFile(selectedFile);
     setAudioUrl(url);
-    setProjectName(selectedFile.name.replace(/\.[^/.]+$/, '')); // 확장자 제거
+    // 프로젝트 이름이 비어있을 때만 파일명으로 자동 설정
+    if (!projectName.trim()) {
+      setProjectName(selectedFile.name.replace(/\.[^/.]+$/, '')); // 확장자 제거
+    }
   }, [audioUrl]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
