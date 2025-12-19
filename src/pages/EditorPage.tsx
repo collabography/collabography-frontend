@@ -747,13 +747,24 @@ export default function EditorPage() {
   const [isLoadingProject, setIsLoadingProject] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   
+  // 페이지 진입 시 재생 상태 초기화 및 시간 리셋
+  useEffect(() => {
+    // 재생 중이면 멈추기
+    if (isPlaying) {
+      togglePlayback();
+    }
+    // 시간 초기화
+    setCurrentTime(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]); // projectId가 바뀔 때만 실행 (페이지 진입/변경 시)
+  
   // 프로젝트 로드
   useEffect(() => {
     if (!projectId) return;
     
     const numericId = parseInt(projectId, 10);
     
-    // 이미 같은 프로젝트가 로드되어 있으면 스킵
+    // 이미 같은 프로젝트가 로드되어 있으면 스킵 (스켈레톤 캐시는 별도 useEffect에서 처리)
     if (project && project.id === numericId) return;
     
     const loadProject = async () => {
@@ -900,6 +911,73 @@ export default function EditorPage() {
     
     loadProject();
   }, [projectId, project, setCurrentProject]);
+
+  // 스켈레톤 캐시가 비어있으면 로드 (프로젝트가 이미 로드된 경우에도)
+  useEffect(() => {
+    if (!project) return;
+    if (skeletonCache.size > 0) return; // 이미 캐시가 있으면 스킵
+    
+    const loadSkeletonCache = async () => {
+      // READY 상태 레이어의 스켈레톤 JSON 자동 로드
+      const readyLayers: Array<{ layerId: number; objectKey: string }> = [];
+      
+      project.tracks.forEach(track => {
+        track.layers.forEach(layer => {
+          if (layer.skeleton.status === 'READY' && layer.skeleton.objectKey) {
+            readyLayers.push({
+              layerId: layer.layerId,
+              objectKey: layer.skeleton.objectKey,
+            });
+          }
+        });
+      });
+      
+      if (readyLayers.length === 0) return;
+      
+      console.log(`📥 Loading ${readyLayers.length} skeleton JSON(s) (cache was empty)...`);
+      
+      // 병렬로 모든 스켈레톤 JSON 로드
+      const loadPromises = readyLayers.map(async ({ layerId, objectKey }) => {
+        try {
+          const presignResult = await assetsApi.getPresignedUrl(objectKey);
+          let url = presignResult.url;
+          
+          // MinIO 호스트 치환 (Docker 내부 -> 프록시)
+          if (url.includes('minio:9000')) {
+            url = url.replace('http://minio:9000', '/minio-presign');
+          }
+          
+          const jsonResponse = await fetch(url);
+          if (!jsonResponse.ok) throw new Error(`HTTP ${jsonResponse.status}`);
+          
+          const skeletonJson = await jsonResponse.json() as SkeletonJson;
+          
+          console.log(`✅ Loaded skeleton for layer ${layerId}`);
+          return { layerId, skeletonJson };
+        } catch (err) {
+          console.warn(`⚠️ Failed to load skeleton for layer ${layerId}:`, err);
+          return null;
+        }
+      });
+      
+      const results = await Promise.all(loadPromises);
+      
+      // 성공한 결과만 캐시에 추가
+      const newCache = new Map<number, SkeletonJson>();
+      results.forEach(result => {
+        if (result) {
+          newCache.set(result.layerId, result.skeletonJson);
+        }
+      });
+      
+      if (newCache.size > 0) {
+        setSkeletonCache(newCache);
+        console.log(`💾 Cached ${newCache.size} skeleton(s) in memory`);
+      }
+    };
+    
+    loadSkeletonCache();
+  }, [project, skeletonCache.size]);
 
   // 타임라인 전체 길이 계산
   const timelineDuration = useMemo(() => {
