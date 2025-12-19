@@ -240,8 +240,8 @@ export const keyframeApi = {
   // 키프레임 전체 교체
   update: (trackId: number, keyframes: Array<{
     time_sec: number;
-    x: number;
-    y: number;
+    x?: number;       // STEP일 때만 필수
+    y?: number;       // STEP일 때만 필수
     interp: 'STEP' | 'LINEAR';
   }>) => apiFetch<{ updated: boolean }>(`/tracks/${trackId}/position-keyframes`, {
     method: 'PUT',

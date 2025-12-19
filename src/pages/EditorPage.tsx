@@ -1,10 +1,147 @@
 import React, { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson, Layers } from 'lucide-react';
+import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson, Layers, Save, Loader2, Check, ChevronsUp, ChevronUp, ChevronsDown, ChevronDown, Trash2 } from 'lucide-react';
 import { Button, FrontView, TopViewEditor } from '@/components';
 import { useProjectStore, useCurrentProject, useCurrentTime, useIsPlaying } from '@/stores';
 import { cn, formatTimeWithMs, formatTime } from '@/lib/utils';
+// TODO: 백엔드 연동 시 활성화
+// import { layerApi, keyframeApi } from '@/lib/api';
 import { TRACK_COLORS, type TrackSlot, type Track, type Layer, type SkeletonJson } from '@/types';
+
+// ============================================
+// Layer Context Menu
+// ============================================
+
+interface LayerContextMenuProps {
+  x: number;
+  y: number;
+  layer: Layer;
+  onClose: () => void;
+  onBringToFront: () => void;
+  onBringForward: () => void;
+  onSendToBack: () => void;
+  onSendBackward: () => void;
+  onDelete: () => void;
+}
+
+function LayerContextMenu({
+  x,
+  y,
+  layer,
+  onClose,
+  onBringToFront,
+  onBringForward,
+  onSendToBack,
+  onSendBackward,
+  onDelete,
+}: LayerContextMenuProps) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // 메뉴 외부 클릭 시 닫기
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [onClose]);
+
+  // 메뉴가 화면 밖으로 나가지 않도록 조정
+  const adjustedPosition = useMemo(() => {
+    const menuWidth = 200;
+    const menuHeight = 320; // 삭제 버튼까지 포함한 높이
+    const padding = 10;
+
+    let adjustedX = x;
+    let adjustedY = y;
+
+    if (x + menuWidth > window.innerWidth - padding) {
+      adjustedX = window.innerWidth - menuWidth - padding;
+    }
+    if (y + menuHeight > window.innerHeight - padding) {
+      adjustedY = Math.max(padding, window.innerHeight - menuHeight - padding);
+    }
+
+    return { x: adjustedX, y: adjustedY };
+  }, [x, y]);
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed z-50 bg-surface-800 border border-surface-600 rounded-lg shadow-xl py-1 min-w-[180px]"
+      style={{ left: adjustedPosition.x, top: adjustedPosition.y }}
+    >
+      {/* 헤더: 레이어 이름 */}
+      <div className="px-3 py-2 border-b border-surface-700">
+        <p className="text-xs text-surface-400">레이어</p>
+        <p className="text-sm text-white font-medium truncate">
+          {layer.label || `Layer ${layer.layerId}`}
+        </p>
+        <p className="text-xs text-surface-500 mt-0.5">
+          Priority: {layer.priority}
+        </p>
+      </div>
+
+      {/* 메뉴 아이템들 */}
+      <div className="py-1">
+        {/* 정렬 관련 메뉴 */}
+        <button
+          onClick={() => { onBringToFront(); onClose(); }}
+          className="w-full px-3 py-2 flex items-center gap-3 text-sm transition-colors hover:bg-surface-700 text-surface-200 hover:text-white"
+        >
+          <ChevronsUp className="w-4 h-4" />
+          <span>맨 앞으로 가져오기</span>
+        </button>
+        <button
+          onClick={() => { onBringForward(); onClose(); }}
+          className="w-full px-3 py-2 flex items-center gap-3 text-sm transition-colors hover:bg-surface-700 text-surface-200 hover:text-white"
+        >
+          <ChevronUp className="w-4 h-4" />
+          <span>앞으로 가져오기</span>
+        </button>
+        <button
+          onClick={() => { onSendBackward(); onClose(); }}
+          className="w-full px-3 py-2 flex items-center gap-3 text-sm transition-colors hover:bg-surface-700 text-surface-200 hover:text-white"
+        >
+          <ChevronDown className="w-4 h-4" />
+          <span>뒤로 보내기</span>
+        </button>
+        <button
+          onClick={() => { onSendToBack(); onClose(); }}
+          className="w-full px-3 py-2 flex items-center gap-3 text-sm transition-colors hover:bg-surface-700 text-surface-200 hover:text-white"
+        >
+          <ChevronsDown className="w-4 h-4" />
+          <span>맨 뒤로 보내기</span>
+        </button>
+        
+        {/* 구분선 */}
+        <div className="my-1 border-t border-surface-700" />
+        
+        {/* 삭제 */}
+        <button
+          onClick={() => { onDelete(); onClose(); }}
+          className="w-full px-3 py-2 flex items-center gap-3 text-sm transition-colors hover:bg-surface-700 text-red-400 hover:text-red-300"
+        >
+          <Trash2 className="w-4 h-4" />
+          <span>삭제</span>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // 타임라인 줌 설정
 const MIN_PIXELS_PER_SECOND = 10;  // 최소 줌 (축소)
@@ -218,19 +355,21 @@ const snapToFrame = (timeSec: number): number => {
   return frame / SNAP_FPS;
 };
 
-// 레이어 블록 컴포넌트 (드래그 가능)
+// 레이어 블록 컴포넌트 (드래그 가능 + 컨텍스트 메뉴)
 function LayerBlock({ 
   layer, 
   color, 
   pixelsPerSecond,
   onDragMove,
   isPatch = false,
+  onContextMenu,
 }: { 
   layer: Layer; 
   color: string; 
   pixelsPerSecond: number;
   onDragMove?: (layerId: number, newStartSec: number) => void;
   isPatch?: boolean;
+  onContextMenu?: (e: React.MouseEvent, layer: Layer) => void;
 }) {
   const width = (layer.endSec - layer.startSec) * pixelsPerSecond;
   const left = layer.startSec * pixelsPerSecond;
@@ -249,6 +388,8 @@ function LayerBlock({
   }, [left, isDragging]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    // 우클릭은 드래그하지 않음
+    if (e.button === 2) return;
     if (!onDragMove) return;
     e.preventDefault();
     e.stopPropagation();
@@ -285,6 +426,13 @@ function LayerBlock({
     document.addEventListener('mouseup', handleMouseUp);
   };
 
+  // 우클릭 핸들러
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onContextMenu?.(e, layer);
+  };
+
   // 드래그 중일 때 스냅 프리뷰
   const snappedLeft = isDragging 
     ? snapToFrame(dragLeft / pixelsPerSecond) * pixelsPerSecond 
@@ -315,6 +463,7 @@ function LayerBlock({
       }}
       title={`${layer.label || 'Layer'} (${(layer.endSec - layer.startSec).toFixed(1)}s) - Priority: ${layer.priority}${isPatch ? ` [패치 #${patchLevel}]` : ''}`}
       onMouseDown={handleMouseDown}
+      onContextMenu={handleContextMenu}
     >
       {isPatch && (
         <span 
@@ -471,11 +620,13 @@ function TrackContent({
   duration,
   pixelsPerSecond,
   onLayerDragMove,
+  onLayerContextMenu,
 }: { 
   track: Track;
   duration: number;
   pixelsPerSecond: number;
   onLayerDragMove: (layerId: number, newStartSec: number) => void;
+  onLayerContextMenu: (e: React.MouseEvent, layer: Layer) => void;
 }) {
   const color = TRACK_COLORS[track.slot];
   const totalWidth = duration * pixelsPerSecond;
@@ -496,6 +647,7 @@ function TrackContent({
           pixelsPerSecond={pixelsPerSecond}
           onDragMove={onLayerDragMove}
           isPatch={layer.priority >= PATCH_PRIORITY_THRESHOLD}
+          onContextMenu={onLayerContextMenu}
         />
       ))}
     </div>
@@ -551,6 +703,8 @@ export default function EditorPage() {
   const setCurrentTime = useProjectStore(state => state.setCurrentTime);
   const togglePlayback = useProjectStore(state => state.togglePlayback);
   const addLayer = useProjectStore(state => state.addLayer);
+  const updateLayer = useProjectStore(state => state.updateLayer);
+  const removeLayer = useProjectStore(state => state.removeLayer);
   const addPositionKeyframe = useProjectStore(state => state.addPositionKeyframe);
 
   // 타임라인 줌 상태
@@ -561,6 +715,18 @@ export default function EditorPage() {
   
   // 스켈레톤 데이터 캐시 (layerId → SkeletonJson)
   const [skeletonCache, setSkeletonCache] = useState<Map<number, SkeletonJson>>(new Map());
+  
+  // 저장 상태 ('idle' | 'saving' | 'saved' | 'error')
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
+  
+  // 컨텍스트 메뉴 상태
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    layer: Layer;
+    trackId: number;
+  } | null>(null);
   
   // 줌 핸들러 (드래그 delta 기반)
   const handleZoom = useCallback((delta: number) => {
@@ -683,6 +849,115 @@ export default function EditorPage() {
       audioRef.current.currentTime = time;
     }
   }, [setCurrentTime]);
+
+  // ============================================
+  // 레이어 컨텍스트 메뉴 핸들러
+  // ============================================
+
+  // 컨텍스트 메뉴 열기
+  const handleLayerContextMenu = useCallback((e: React.MouseEvent, layer: Layer) => {
+    // trackId 찾기
+    const track = project?.tracks.find(t => t.layers.some(l => l.layerId === layer.layerId));
+    if (!track) return;
+    
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      layer,
+      trackId: track.trackId,
+    });
+  }, [project]);
+
+  // 컨텍스트 메뉴 닫기
+  const handleCloseContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  // 맨 앞으로 가져오기 (트랙 내 최대 priority + 1)
+  const handleBringToFront = useCallback(() => {
+    if (!contextMenu || !project) return;
+    
+    const track = project.tracks.find(t => t.trackId === contextMenu.trackId);
+    if (!track) return;
+    
+    const maxPriority = Math.max(...track.layers.map(l => l.priority));
+    if (contextMenu.layer.priority < maxPriority) {
+      updateLayer(contextMenu.layer.layerId, { priority: maxPriority + 1 });
+      console.log(`🔼 [맨 앞으로] ${contextMenu.layer.label}: ${contextMenu.layer.priority} → ${maxPriority + 1}`);
+    }
+  }, [contextMenu, project, updateLayer]);
+
+  // 앞으로 가져오기 (priority + 1, 단 같은 값이 있으면 swap)
+  const handleBringForward = useCallback(() => {
+    if (!contextMenu || !project) return;
+    
+    const track = project.tracks.find(t => t.trackId === contextMenu.trackId);
+    if (!track) return;
+    
+    // 현재 priority보다 높은 레이어 중 가장 낮은 것 찾기
+    const higherLayers = track.layers
+      .filter(l => l.priority > contextMenu.layer.priority)
+      .sort((a, b) => a.priority - b.priority);
+    
+    if (higherLayers.length > 0) {
+      const nextLayer = higherLayers[0];
+      // Swap priorities
+      updateLayer(contextMenu.layer.layerId, { priority: nextLayer.priority });
+      updateLayer(nextLayer.layerId, { priority: contextMenu.layer.priority });
+      console.log(`🔼 [앞으로] ${contextMenu.layer.label}: ${contextMenu.layer.priority} ↔ ${nextLayer.priority}`);
+    }
+  }, [contextMenu, project, updateLayer]);
+
+  // 맨 뒤로 보내기 (트랙 내 최소 priority - 1, 최소 1)
+  const handleSendToBack = useCallback(() => {
+    if (!contextMenu || !project) return;
+    
+    const track = project.tracks.find(t => t.trackId === contextMenu.trackId);
+    if (!track) return;
+    
+    const minPriority = Math.min(...track.layers.map(l => l.priority));
+    if (contextMenu.layer.priority > minPriority) {
+      const newPriority = Math.max(1, minPriority - 1);
+      updateLayer(contextMenu.layer.layerId, { priority: newPriority });
+      console.log(`🔽 [맨 뒤로] ${contextMenu.layer.label}: ${contextMenu.layer.priority} → ${newPriority}`);
+    }
+  }, [contextMenu, project, updateLayer]);
+
+  // 뒤로 보내기 (priority - 1, 단 같은 값이 있으면 swap)
+  const handleSendBackward = useCallback(() => {
+    if (!contextMenu || !project) return;
+    
+    const track = project.tracks.find(t => t.trackId === contextMenu.trackId);
+    if (!track) return;
+    
+    // 현재 priority보다 낮은 레이어 중 가장 높은 것 찾기
+    const lowerLayers = track.layers
+      .filter(l => l.priority < contextMenu.layer.priority)
+      .sort((a, b) => b.priority - a.priority);
+    
+    if (lowerLayers.length > 0) {
+      const prevLayer = lowerLayers[0];
+      // Swap priorities
+      updateLayer(contextMenu.layer.layerId, { priority: prevLayer.priority });
+      updateLayer(prevLayer.layerId, { priority: contextMenu.layer.priority });
+      console.log(`🔽 [뒤로] ${contextMenu.layer.label}: ${contextMenu.layer.priority} ↔ ${prevLayer.priority}`);
+    }
+  }, [contextMenu, project, updateLayer]);
+
+  // 레이어 삭제
+  const handleDeleteLayer = useCallback(() => {
+    if (!contextMenu) return;
+    
+    // 스켈레톤 캐시에서도 제거
+    setSkeletonCache(prev => {
+      const newCache = new Map(prev);
+      newCache.delete(contextMenu.layer.layerId);
+      return newCache;
+    });
+    
+    removeLayer(contextMenu.layer.layerId);
+    console.log(`🗑️ [삭제] ${contextMenu.layer.label}`);
+  }, [contextMenu, removeLayer]);
 
   // 동영상 업로드 핸들러
   const handleUploadVideo = useCallback((trackId: number, file: File) => {
@@ -909,8 +1184,6 @@ export default function EditorPage() {
   }, [currentTime, addLayer, addToSkeletonCache]);
 
   // 레이어 드래그 이동 핸들러
-  const updateLayer = useProjectStore(state => state.updateLayer);
-  
   const handleLayerDragMove = useCallback((layerId: number, newStartSec: number) => {
     // 해당 레이어 찾기
     if (!project) return;
@@ -1009,6 +1282,130 @@ export default function EditorPage() {
     setTopViewMode(newMode);
   }, [isPlaying, togglePlayback]);
 
+  // ============================================
+  // 저장 기능
+  // ============================================
+  
+  /**
+   * 프로젝트 상태를 백엔드에 저장
+   * 1. 각 레이어의 정보 (start_sec, end_sec, priority, label) → PATCH /layers/{layer_id}
+   * 2. 각 트랙의 Position Keyframes → PUT /tracks/{track_id}/position-keyframes
+   */
+  const handleSaveProject = useCallback(async () => {
+    if (!project) return;
+    
+    setSaveStatus('saving');
+    setSaveError(null);
+    
+    // ============================================
+    // [DEBUG] 백엔드 연동 전 - Console에 저장할 데이터 출력
+    // ============================================
+    
+    console.log('📦 ===== SAVE PROJECT DATA =====');
+    console.log('Project ID:', project.id);
+    console.log('Project Title:', project.title);
+    console.log('');
+    
+    // 1. 각 레이어 데이터 출력
+    console.log('🎬 LAYERS (PATCH /layers/{layer_id}):');
+    project.tracks.forEach(track => {
+      console.log(`\n  Track ${track.slot} (trackId: ${track.trackId}):`);
+      track.layers.forEach(layer => {
+        const layerBody = {
+          start_sec: layer.startSec,
+          end_sec: layer.endSec,
+          priority: layer.priority,
+          label: layer.label ?? null,
+          fade_in_sec: layer.fadeInSec,
+          fade_out_sec: layer.fadeOutSec,
+        };
+        console.log(`    [Layer ${layer.layerId}] ${layer.label || 'unnamed'}:`, layerBody);
+      });
+    });
+    
+    console.log('');
+    
+    // 2. 각 트랙의 Position Keyframes 출력
+    console.log('📍 POSITION KEYFRAMES (PUT /tracks/{track_id}/position-keyframes):');
+    project.tracks.forEach(track => {
+      const keyframesBody = {
+        keyframes: track.positionKeyframes.map(kf => ({
+          time_sec: kf.timeSec,
+          x: kf.x,
+          y: kf.y,
+          interp: kf.interp,
+        }))
+      };
+      console.log(`\n  Track ${track.slot} (trackId: ${track.trackId}):`, keyframesBody);
+    });
+    
+    console.log('');
+    console.log('📦 ===== END SAVE DATA =====');
+    
+    // 저장 성공 시뮬레이션
+    setSaveStatus('saved');
+    
+    // 2초 후 idle 상태로 복귀
+    setTimeout(() => {
+      setSaveStatus('idle');
+    }, 2000);
+    
+    /* ============================================
+     * [TODO] 백엔드 연동 시 아래 코드 활성화
+     * ============================================
+    try {
+      // 1. 모든 레이어 정보 저장
+      const layerPromises = project.tracks.flatMap(track =>
+        track.layers.map(layer =>
+          layerApi.update(layer.layerId, {
+            start_sec: layer.startSec,
+            end_sec: layer.endSec,
+            priority: layer.priority,
+            label: layer.label ?? undefined,
+            fade_in_sec: layer.fadeInSec,
+            fade_out_sec: layer.fadeOutSec,
+          })
+        )
+      );
+      
+      // 2. 모든 트랙의 Position Keyframes 저장
+      const keyframePromises = project.tracks.map(track =>
+        keyframeApi.update(
+          track.trackId,
+          track.positionKeyframes.map(kf => ({
+            time_sec: kf.timeSec,
+            x: kf.x,
+            y: kf.y,
+            interp: kf.interp,
+          }))
+        )
+      );
+      
+      // 병렬로 모든 요청 실행
+      await Promise.all([...layerPromises, ...keyframePromises]);
+      
+      setSaveStatus('saved');
+      console.log('✅ Project saved successfully!');
+      
+      // 2초 후 idle 상태로 복귀
+      setTimeout(() => {
+        setSaveStatus('idle');
+      }, 2000);
+      
+    } catch (error) {
+      console.error('❌ Failed to save project:', error);
+      setSaveStatus('error');
+      setSaveError(error instanceof Error ? error.message : '저장 중 오류가 발생했습니다.');
+      
+      // 3초 후 idle 상태로 복귀
+      setTimeout(() => {
+        setSaveStatus('idle');
+        setSaveError(null);
+      }, 3000);
+    }
+    */
+  }, [project]);
+
   if (!project) {
     return (
       <div className="min-h-screen bg-surface-900 flex items-center justify-center">
@@ -1034,10 +1431,49 @@ export default function EditorPage() {
           {project.title}
         </h1>
         
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-3">
           <span className="text-xs text-surface-500 font-mono">
             {project.music.objectKey?.split('/').pop() || 'No music'}
           </span>
+          
+          {/* 저장 버튼 */}
+          <Button
+            variant={saveStatus === 'error' ? 'primary' : 'ghost'}
+            size="sm"
+            onClick={handleSaveProject}
+            disabled={saveStatus === 'saving'}
+            className={cn(
+              'flex items-center gap-2 px-3 h-8 transition-all',
+              saveStatus === 'saved' && 'text-green-400 border-green-500/50',
+              saveStatus === 'error' && 'text-red-400 border-red-500/50 bg-red-500/10',
+            )}
+            title={saveError || '프로젝트 저장'}
+          >
+            {saveStatus === 'saving' && (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>저장 중...</span>
+              </>
+            )}
+            {saveStatus === 'saved' && (
+              <>
+                <Check className="w-4 h-4" />
+                <span>저장됨</span>
+              </>
+            )}
+            {saveStatus === 'error' && (
+              <>
+                <Save className="w-4 h-4" />
+                <span>재시도</span>
+              </>
+            )}
+            {saveStatus === 'idle' && (
+              <>
+                <Save className="w-4 h-4" />
+                <span>저장</span>
+              </>
+            )}
+          </Button>
         </div>
       </header>
 
@@ -1176,6 +1612,7 @@ export default function EditorPage() {
                     duration={timelineDuration}
                     pixelsPerSecond={pixelsPerSecond}
                     onLayerDragMove={handleLayerDragMove}
+                    onLayerContextMenu={handleLayerContextMenu}
                   />
                 ))}
                 
@@ -1186,6 +1623,21 @@ export default function EditorPage() {
           </div>
         </div>
       </div>
+
+      {/* 레이어 컨텍스트 메뉴 */}
+      {contextMenu && (
+        <LayerContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          layer={contextMenu.layer}
+          onClose={handleCloseContextMenu}
+          onBringToFront={handleBringToFront}
+          onBringForward={handleBringForward}
+          onSendToBack={handleSendToBack}
+          onSendBackward={handleSendBackward}
+          onDelete={handleDeleteLayer}
+        />
+      )}
     </div>
   );
 }
