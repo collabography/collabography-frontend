@@ -237,7 +237,7 @@ function LayerBlock({
   const isProcessing = layer.skeleton.status === 'PROCESSING';
   const isFailed = layer.skeleton.status === 'FAILED';
   
-  const dragRef = useRef<{ startX: number; startLeft: number } | null>(null);
+  const dragRef = useRef<{ startX: number; startLeft: number; currentLeft: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragLeft, setDragLeft] = useState(left);
 
@@ -255,7 +255,8 @@ function LayerBlock({
     
     dragRef.current = {
       startX: e.clientX,
-      startLeft: dragLeft,
+      startLeft: left,
+      currentLeft: left,
     };
     setIsDragging(true);
     
@@ -264,13 +265,14 @@ function LayerBlock({
       
       const deltaX = moveEvent.clientX - dragRef.current.startX;
       const newLeft = Math.max(0, dragRef.current.startLeft + deltaX);
+      dragRef.current.currentLeft = newLeft; // ref에 최신값 저장
       setDragLeft(newLeft);
     };
     
     const handleMouseUp = () => {
       if (dragRef.current && onDragMove) {
-        // 프레임 스냅 적용
-        const newStartSec = snapToFrame(dragLeft / pixelsPerSecond);
+        // ref에서 최신값 가져와서 프레임 스냅 적용
+        const newStartSec = snapToFrame(dragRef.current.currentLeft / pixelsPerSecond);
         onDragMove(layer.layerId, newStartSec);
       }
       dragRef.current = null;
@@ -288,6 +290,9 @@ function LayerBlock({
     ? snapToFrame(dragLeft / pixelsPerSecond) * pixelsPerSecond 
     : left;
 
+  // 패치 레벨 표시 (몇 번째 패치인지)
+  const patchLevel = isPatch ? layer.priority - PATCH_PRIORITY_THRESHOLD : 0;
+
   return (
     <div
       className={cn(
@@ -297,25 +302,34 @@ function LayerBlock({
         isProcessing && 'animate-pulse',
         isFailed && 'opacity-50',
         onDragMove ? 'cursor-grab' : 'cursor-pointer',
-        isDragging && 'cursor-grabbing opacity-80 z-30',
-        isPatch && 'border-2 border-dashed'
+        isDragging && 'cursor-grabbing z-30',
+        isPatch && 'border-2'
       )}
       style={{
         left: isDragging ? dragLeft : snappedLeft,
         width: Math.max(width, 20),
-        backgroundColor: isPatch ? `${color}50` : `${color}30`,
-        borderColor: isFailed ? '#ef4444' : isPatch ? color : `${color}60`,
-        boxShadow: isPatch ? `0 0 8px ${color}40` : undefined,
+        backgroundColor: isPatch ? color : `${color}30`, // 패치는 100% 불투명
+        borderColor: isFailed ? '#ef4444' : isPatch ? '#fff' : color,
+        boxShadow: isPatch ? `0 0 ${8 + patchLevel * 4}px ${color}` : undefined,
+        zIndex: isPatch ? 10 + patchLevel : 1,
       }}
-      title={`${layer.label || 'Layer'} (${(layer.endSec - layer.startSec).toFixed(1)}s) - Priority: ${layer.priority}${isPatch ? ' [패치]' : ''}`}
+      title={`${layer.label || 'Layer'} (${(layer.endSec - layer.startSec).toFixed(1)}s) - Priority: ${layer.priority}${isPatch ? ` [패치 #${patchLevel}]` : ''}`}
       onMouseDown={handleMouseDown}
     >
       {isPatch && (
-        <span className="text-[10px] bg-white/20 px-1 rounded mr-1">패치</span>
+        <span 
+          className="text-[10px] px-1 rounded mr-1 font-bold text-white flex-shrink-0"
+          style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
+        >
+          P{patchLevel}
+        </span>
       )}
       <span 
-        className="text-xs font-medium truncate"
-        style={{ color: isFailed ? '#ef4444' : color }}
+        className={cn(
+          'text-xs font-medium truncate',
+          isPatch && 'text-white drop-shadow-md'
+        )}
+        style={{ color: isFailed ? '#ef4444' : isPatch ? '#ffffff' : color }}
       >
         {layer.label || `Layer ${layer.layerId}`}
         {isProcessing && ' ⏳'}
@@ -848,14 +862,25 @@ export default function EditorPage() {
         
         const layerId = Date.now();
         
-        // 패치는 priority를 100 이상으로 설정
+        // store에서 최신 상태를 직접 가져와서 최대 priority 계산
+        // (closure로 인해 project가 stale할 수 있으므로)
+        const currentState = useProjectStore.getState();
+        const latestProject = currentState.currentProject;
+        const track = latestProject?.tracks.find(t => t.trackId === trackId);
+        const maxPriority = track?.layers.reduce((max, layer) => 
+          Math.max(max, layer.priority), PATCH_PRIORITY_THRESHOLD
+        ) ?? PATCH_PRIORITY_THRESHOLD;
+        
+        console.log(`📊 Current max priority in track: ${maxPriority}, new patch will be: ${maxPriority + 1}`);
+        
+        // 패치는 항상 기존보다 높은 priority로 설정
         addLayer(trackId, {
           layerId,
           trackId,
           startSec: snappedStartTime,
           endSec: snappedStartTime + duration,
-          priority: PATCH_PRIORITY_THRESHOLD + 1, // 패치 우선순위
-          label: `패치: ${file.name.replace(/\.[^/.]+$/, '')}`,
+          priority: maxPriority + 1, // 항상 기존 최대 + 1
+          label: `${file.name.replace(/\.[^/.]+$/, '')}`,
           fadeInSec: 0,
           fadeOutSec: 0,
           skeleton: {
@@ -917,22 +942,36 @@ export default function EditorPage() {
     if (!project) return [];
     
     return project.tracks.map(track => {
-      // 현재 시간에 활성화된 레이어 찾기 (priority 최대)
+      // 현재 시간에 활성화된 레이어 찾기
       const activeLayers = track.layers.filter(
         layer => layer.startSec <= currentTime && currentTime < layer.endSec
       );
       
-      const activeLayer = activeLayers.length > 0
-        ? activeLayers.reduce((max, layer) => layer.priority > max.priority ? layer : max)
+      // READY 상태이고 캐시에 데이터가 있는 레이어만 필터링
+      const readyLayers = activeLayers.filter(
+        layer => layer.skeleton.status === 'READY' && skeletonCache.has(layer.layerId)
+      );
+      
+      // 그 중에서 priority가 가장 높은 레이어 선택
+      const activeLayer = readyLayers.length > 0
+        ? readyLayers.reduce((max, layer) => layer.priority > max.priority ? layer : max)
         : null;
       
-      // 활성 레이어가 있고 READY 상태면 캐시에서 스켈레톤 데이터 가져오기
-      const skeletonData = activeLayer?.skeleton.status === 'READY'
+      // 스켈레톤 데이터 가져오기
+      const skeletonData = activeLayer
         ? skeletonCache.get(activeLayer.layerId) || null
         : null;
       
-      // 스켈레톤 데이터가 있으면 레이어 시작 시간 기준으로 로컬 시간 계산
+      // 레이어 시작 시간 기준으로 로컬 시간 계산
       const localTime = activeLayer ? currentTime - activeLayer.startSec : 0;
+      
+      // 디버깅용 로그
+      if (readyLayers.length > 1) {
+        console.log(`[Track ${track.slot}] Active layers:`, 
+          readyLayers.map(l => `${l.label}(P${l.priority})`).join(', '),
+          `→ Selected: ${activeLayer?.label}(P${activeLayer?.priority})`
+        );
+      }
       
       return {
         slot: track.slot,
