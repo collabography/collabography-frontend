@@ -68,11 +68,16 @@ export interface Layer {
 // Position Keyframe (Top View 동선)
 // ============================================
 
+/**
+ * Position Keyframe
+ * - STEP: 해당 위치에서 멈춤 (x, y 필수)
+ * - LINEAR: 이전 STEP에서 다음 STEP으로 이동 구간 (x, y 불필요)
+ */
 export interface PositionKeyframe {
   id: number;
   timeSec: number;
-  x: number;
-  y: number;
+  x?: number;    // STEP일 때만 필수
+  y?: number;    // STEP일 때만 필수
   interp: InterpType;
 }
 
@@ -218,8 +223,8 @@ export interface UpdateLayerRequest {
 export interface UpdatePositionKeyframesRequest {
   keyframes: Array<{
     timeSec: number;
-    x: number;
-    y: number;
+    x?: number;    // STEP일 때만 필수
+    y?: number;    // STEP일 때만 필수
     interp: InterpType;
   }>;
 }

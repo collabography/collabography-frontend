@@ -9,7 +9,6 @@ import type {
   TrackSlot,
   Music,
   AssetStatus,
-  SkeletonSource,
 } from '@/types';
 
 // ============================================
@@ -99,32 +98,15 @@ interface ProjectState {
 // Helper Functions
 // ============================================
 
-// 댄서별 mock position keyframes
+/**
+ * 초기 Position Keyframes (빈 상태)
+ * - 각 댄서에 시작 위치(0초)만 설정
+ * - 편집 모드에서 추가 키프레임 생성 가능
+ */
 const MOCK_POSITION_KEYFRAMES: Record<TrackSlot, PositionKeyframe[]> = {
-  // Dancer 1: 왼쪽에서 시작, 대각선으로 중앙, 오른쪽으로 이동
-  1: [
-    { id: 101, timeSec: 0.0, x: 0.2, y: 0.7, interp: 'LINEAR' },
-    { id: 102, timeSec: 1.5, x: 0.35, y: 0.4, interp: 'LINEAR' },
-    { id: 103, timeSec: 3.0, x: 0.5, y: 0.5, interp: 'LINEAR' },
-    { id: 104, timeSec: 4.5, x: 0.65, y: 0.3, interp: 'LINEAR' },
-    { id: 105, timeSec: 6.0, x: 0.4, y: 0.6, interp: 'LINEAR' },
-  ],
-  // Dancer 2: 중앙에서 시작, 앞뒤로 이동
-  2: [
-    { id: 201, timeSec: 0.0, x: 0.5, y: 0.3, interp: 'LINEAR' },
-    { id: 202, timeSec: 1.5, x: 0.5, y: 0.6, interp: 'LINEAR' },
-    { id: 203, timeSec: 3.0, x: 0.4, y: 0.4, interp: 'LINEAR' },
-    { id: 204, timeSec: 4.5, x: 0.6, y: 0.5, interp: 'LINEAR' },
-    { id: 205, timeSec: 6.0, x: 0.5, y: 0.35, interp: 'LINEAR' },
-  ],
-  // Dancer 3: 오른쪽에서 시작, 원형으로 이동
-  3: [
-    { id: 301, timeSec: 0.0, x: 0.8, y: 0.5, interp: 'LINEAR' },
-    { id: 302, timeSec: 1.5, x: 0.7, y: 0.3, interp: 'LINEAR' },
-    { id: 303, timeSec: 3.0, x: 0.5, y: 0.25, interp: 'LINEAR' },
-    { id: 304, timeSec: 4.5, x: 0.3, y: 0.4, interp: 'LINEAR' },
-    { id: 305, timeSec: 6.0, x: 0.6, y: 0.65, interp: 'LINEAR' },
-  ],
+  1: [{ id: 101, timeSec: 0.0, x: 0.25, y: 0.5, interp: 'STEP' }],  // Dancer 1: 왼쪽
+  2: [{ id: 201, timeSec: 0.0, x: 0.5, y: 0.5, interp: 'STEP' }],   // Dancer 2: 중앙
+  3: [{ id: 301, timeSec: 0.0, x: 0.75, y: 0.5, interp: 'STEP' }],  // Dancer 3: 오른쪽
 };
 
 // 빈 트랙 생성 (mock position keyframes 포함)
@@ -279,16 +261,56 @@ export const useProjectStore = create<ProjectState>()(
       
       const track = state.currentProject.tracks.find(t => t.trackId === trackId);
       if (track) {
+        const TRANSITION_DURATION = 0.5; // 이동에 걸리는 시간 (초)
+        
         // 같은 시간에 기존 키프레임이 있으면 업데이트
         const existingIdx = track.positionKeyframes.findIndex(
           k => Math.abs(k.timeSec - keyframe.timeSec) < 0.01
         );
         
         if (existingIdx >= 0) {
+          // 기존 STEP 키프레임 업데이트
           track.positionKeyframes[existingIdx] = keyframe;
         } else {
+          // 새 STEP 키프레임 추가
           track.positionKeyframes.push(keyframe);
           track.positionKeyframes.sort((a, b) => a.timeSec - b.timeSec);
+          
+          // === 자동 LINEAR 삽입 로직 ===
+          // 이전 STEP 키프레임 찾기
+          const sortedSteps = track.positionKeyframes
+            .filter(k => k.interp === 'STEP')
+            .sort((a, b) => a.timeSec - b.timeSec);
+          
+          const newStepIdx = sortedSteps.findIndex(k => k.id === keyframe.id);
+          
+          // 첫 번째가 아니고, 이전 STEP과 충분한 간격이 있으면
+          if (newStepIdx > 0) {
+            const prevStep = sortedSteps[newStepIdx - 1];
+            const gap = keyframe.timeSec - prevStep.timeSec;
+            
+            // 0.5초 이상 간격이 있을 때만 LINEAR 삽입
+            if (gap > TRANSITION_DURATION) {
+              const linearTime = keyframe.timeSec - TRANSITION_DURATION;
+              
+              // 해당 시간에 이미 LINEAR가 있는지 확인
+              const existingLinear = track.positionKeyframes.find(
+                k => k.interp === 'LINEAR' && Math.abs(k.timeSec - linearTime) < 0.01
+              );
+              
+              if (!existingLinear) {
+                // LINEAR 키프레임 자동 추가 (x, y 없음)
+                track.positionKeyframes.push({
+                  id: Date.now() + Math.random() * 1000, // 유니크 ID
+                  timeSec: linearTime,
+                  interp: 'LINEAR',
+                });
+                track.positionKeyframes.sort((a, b) => a.timeSec - b.timeSec);
+                
+                console.log(`🔄 Auto-added LINEAR at ${linearTime.toFixed(2)}s (${TRANSITION_DURATION}s before STEP)`);
+              }
+            }
+          }
         }
       }
     }),

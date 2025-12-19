@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Play, Pause, SkipBack, Square, Video, FileJson } from 'lucide-react';
-import { Button, FrontView, TopView } from '@/components';
+import { Button, FrontView, TopViewEditor } from '@/components';
 import { useProjectStore, useCurrentProject, useCurrentTime, useIsPlaying } from '@/stores';
 import { cn, formatTimeWithMs, formatTime } from '@/lib/utils';
 import { TRACK_COLORS, type TrackSlot, type Track, type Layer, type SkeletonJson } from '@/types';
@@ -14,26 +14,6 @@ const DEFAULT_PIXELS_PER_SECOND = 50;
 // ============================================
 // Placeholder Components
 // ============================================
-
-function TopViewPlaceholder() {
-  return (
-    <div className="h-full bg-surface-900 rounded-lg border border-surface-700 flex items-center justify-center">
-      <div className="text-center">
-        <div className="flex justify-center gap-4 mb-4">
-          {([1, 2, 3] as TrackSlot[]).map((slot) => (
-            <div
-              key={slot}
-              className="w-6 h-6 rounded-full"
-              style={{ backgroundColor: TRACK_COLORS[slot] }}
-            />
-          ))}
-        </div>
-        <p className="text-surface-400 text-sm">Top View</p>
-        <p className="text-surface-500 text-xs mt-1">위에서 본 댄서 배치</p>
-      </div>
-    </div>
-  );
-}
 
 function FrontViewPlaceholder() {
   return (
@@ -66,7 +46,6 @@ function FrontViewPlaceholder() {
 
 // 타임라인 눈금자 (내용 영역만) + 드래그 줌
 const FPS = 24;
-const FRAME_DURATION = 1 / FPS; // ~0.0417초
 
 function TimelineRulerContent({ 
   duration, 
@@ -425,9 +404,13 @@ export default function EditorPage() {
   const setCurrentTime = useProjectStore(state => state.setCurrentTime);
   const togglePlayback = useProjectStore(state => state.togglePlayback);
   const addLayer = useProjectStore(state => state.addLayer);
+  const addPositionKeyframe = useProjectStore(state => state.addPositionKeyframe);
 
   // 타임라인 줌 상태
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND);
+  
+  // Top View 모드 (재생/편집)
+  const [topViewMode, setTopViewMode] = useState<'play' | 'edit'>('play');
   
   // 스켈레톤 데이터 캐시 (layerId → SkeletonJson)
   const [skeletonCache, setSkeletonCache] = useState<Map<number, SkeletonJson>>(new Map());
@@ -732,6 +715,34 @@ export default function EditorPage() {
     });
   }, [project, currentTime, skeletonCache]);
 
+  // Top View 위치 저장 핸들러
+  const handleSavePositions = useCallback((positions: Array<{ slot: TrackSlot; x: number; y: number }>) => {
+    if (!project) return;
+    
+    positions.forEach(({ slot, x, y }) => {
+      const track = project.tracks.find(t => t.slot === slot);
+      if (track) {
+        // 새 STEP 키프레임 추가
+        addPositionKeyframe(track.trackId, {
+          id: Date.now() + slot, // 유니크 ID
+          timeSec: currentTime,
+          x,
+          y,
+          interp: 'STEP',
+        });
+        console.log(`✅ Saved position for Dancer ${slot} at ${currentTime.toFixed(2)}s: (${x.toFixed(2)}, ${y.toFixed(2)})`);
+      }
+    });
+  }, [project, currentTime, addPositionKeyframe]);
+
+  // 편집 모드 변경 시 재생 중이면 일시정지
+  const handleTopViewModeChange = useCallback((newMode: 'play' | 'edit') => {
+    if (newMode === 'edit' && isPlaying) {
+      togglePlayback();
+    }
+    setTopViewMode(newMode);
+  }, [isPlaying, togglePlayback]);
+
   if (!project) {
     return (
       <div className="min-h-screen bg-surface-900 flex items-center justify-center">
@@ -769,21 +780,20 @@ export default function EditorPage() {
         {/* 프리뷰 영역 */}
         <div className="flex-1 min-h-0 p-4 flex gap-4">
           <div className="flex-1 min-w-0">
-            {/* Top View - 무대 배치도 */}
-            <div className="h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden">
-              {project.tracks.some(t => t.positionKeyframes.length > 0) ? (
-                <TopView 
-                  dancers={project.tracks.map(t => ({
-                    slot: t.slot,
-                    positionKeyframes: t.positionKeyframes,
-                  }))}
-                  currentTime={currentTime}
-                  showPaths={true}
-                  showKeyframes={true}
-                />
-              ) : (
-                <TopViewPlaceholder />
-              )}
+            {/* Top View - 무대 배치도 (재생/편집 모드) */}
+            <div className="h-full bg-surface-900 rounded-lg border border-surface-700 overflow-hidden relative">
+              <TopViewEditor
+                dancers={project.tracks.map(t => ({
+                  slot: t.slot,
+                  positionKeyframes: t.positionKeyframes,
+                }))}
+                currentTime={currentTime}
+                mode={topViewMode}
+                onModeChange={handleTopViewModeChange}
+                onSavePositions={handleSavePositions}
+                showPaths={true}
+                showKeyframes={true}
+              />
             </div>
           </div>
           <div className="flex-1 min-w-0 h-full">
